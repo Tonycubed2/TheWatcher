@@ -43,7 +43,7 @@ namespace
 		if (a_msg->type == SKSE::MessagingInterface::kDataLoaded) {
 			if (Settings::Get().eventsLog) {
 				Events::Open();
-				Events::Write(std::format("SESSION START  The Watcher 1.1.2, game {}, pid {}", REL::Module::get().version().string(), GetCurrentProcessId()));
+				Events::Write(std::format("SESSION START  The Watcher version 4, game {}, pid {}", REL::Module::get().version().string(), GetCurrentProcessId()));
 			}
 			Monitor::RegisterEventSinks();
 			Watchdog::Start();
@@ -59,8 +59,8 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	SetupLog();
 
 	const auto ver = REL::Module::get().version();
-	const char* runtime = ver.minor() >= 6 ? "AE (1.6.x)" : (ver.minor() == 5 ? "SE (1.5.x)" : "unsupported/untested (VR or other)");
-	spdlog::info("The Watcher 1.1.2, game {} - runtime {}", ver.string(), runtime);
+	const char* runtime = ver.minor() >= 6 ? "AE (1.6.x)" : (ver.minor() == 5 ? "SE (1.5.x)" : (ver.minor() == 4 ? "VR (1.4.x)" : "unknown"));
+	spdlog::info("The Watcher version 4, game {} - runtime {}", ver.string(), runtime);
 
 	// Plugins load on the game's main thread; the frame hook confirms this on its first call anyway
 	Monitor::Get().mainThreadId.store(GetCurrentThreadId());

@@ -977,7 +977,7 @@ namespace Capture
 		const auto hist = SummarizeHistory(mods, 3);
 
 		std::string report;
-		report += std::format("The Watcher 1.1.2 stall capture #{}  {}\n", a_index, Util::Stamp(false));
+		report += std::format("The Watcher version 4 stall capture #{}  {}\n", a_index, Util::Stamp(false));
 		report += std::format("Reason: {}\n", a_reason);
 		report += std::format("Frame heartbeat age at stack capture: {:.0f} ms | Loading screen: {}\n", hbMs, loading ? "open" : "closed");
 		if (recovered) {
@@ -1022,7 +1022,7 @@ namespace Capture
 		const auto mainSig = mainOk ? Signature(mainStack, mods) : std::string();
 		auto writeSummary = [&](const SamplingResult& a_sampling) {
 			const auto json = std::format(
-				"{{\n  \"watcher_version\":\"1.1.2\",\n  \"index\":{},\n  \"time\":{},\n  \"reason\":{},\n  \"recovered\":{},\n  \"heartbeat_age_ms\":{:.0f},\n"
+				"{{\n  \"watcher_version\":\"4\",\n  \"index\":{},\n  \"time\":{},\n  \"reason\":{},\n  \"recovered\":{},\n  \"heartbeat_age_ms\":{:.0f},\n"
 				"  \"loading\":{},\n  \"signature\":{},\n  \"main_stack_signature\":{},\n  \"context\":{},\n  \"history\":{},\n  \"main_stack\":{},\n"
 				"  \"sampling\":{{\"same\":{},\"changed\":{},\"incomplete\":{},\"main\":{}}},\n  \"thread_groups\":{}\n}}\n",
 				a_index, Util::Json(Util::Stamp(false)), Util::Json(a_reason), recovered ? "true" : "false", hbMs, loading ? "true" : "false",

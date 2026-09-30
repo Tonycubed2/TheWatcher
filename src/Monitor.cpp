@@ -564,6 +564,19 @@ namespace Monitor
 		return true;
 	}
 
+	// Version 4: some event sources do not exist on every runtime. On Skyrim VR 1.4.15 the fast-travel-end source is
+	// missing, CommonLib returns a null source, and registering on it crashed the game at startup. Every
+	// script-event sink now checks its source first and is skipped (with a log line) if the runtime lacks it.
+	template <class Event, class Sink>
+	void AddScriptSink(RE::ScriptEventSourceHolder* a_holder, Sink* a_sink, std::string_view a_name)
+	{
+		if (auto* source = a_holder->GetEventSource<Event>()) {
+			source->AddEventSink(static_cast<RE::BSTEventSink<Event>*>(a_sink));
+		} else {
+			spdlog::warn("The {} event is not available on this game version; that feature is skipped", a_name);
+		}
+	}
+
 	void RegisterEventSinks()
 	{
 		if (const auto ui = RE::UI::GetSingleton()) {
@@ -573,13 +586,13 @@ namespace Monitor
 		}
 
 		if (const auto holder = RE::ScriptEventSourceHolder::GetSingleton()) {
-			holder->AddEventSink<RE::TESObjectLoadedEvent>(LoadSink::Get());
-			holder->AddEventSink<RE::TESCellAttachDetachEvent>(LoadSink::Get());
-			holder->AddEventSink<RE::TESCellFullyLoadedEvent>(LoadSink::Get());
+			AddScriptSink<RE::TESObjectLoadedEvent>(holder, LoadSink::Get(), "object loaded");
+			AddScriptSink<RE::TESCellAttachDetachEvent>(holder, LoadSink::Get(), "cell attach/detach");
+			AddScriptSink<RE::TESCellFullyLoadedEvent>(holder, LoadSink::Get(), "cell fully loaded");
 			if (Settings::Get().eventsLog) {
-				holder->AddEventSink<RE::TESFastTravelEndEvent>(GameSink::Get());
+				AddScriptSink<RE::TESFastTravelEndEvent>(holder, GameSink::Get(), "fast travel end");
 				if (Settings::Get().equipEvents) {
-					holder->AddEventSink<RE::TESEquipEvent>(GameSink::Get());
+					AddScriptSink<RE::TESEquipEvent>(holder, GameSink::Get(), "equip");
 				}
 			}
 		} else {

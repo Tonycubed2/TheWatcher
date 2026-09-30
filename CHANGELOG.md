@@ -1,5 +1,10 @@
 # Changelog
 
+## Version 4
+
+- Fixed a crash at startup on Skyrim VR 1.4.15: the fast-travel-end event source does not exist there, and registering on it crashed. Every game-event registration now checks that the event exists on the running game and skips it (with a log line) if not.
+- The log now names VR correctly as the runtime.
+
 ## 1.1.2
 Built on top of the original author's 1.0.4, keeping all of its changes: the out-of-process dump helper
 (`TheWatcherDump.exe`), saving the report before slower steps, the stuck-capture guard, SAME/CHANGED/INCOMPLETE
