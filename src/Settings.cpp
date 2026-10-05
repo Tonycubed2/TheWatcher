@@ -169,6 +169,8 @@ void Settings::Load()
 		equipAllActors = GetB(a_sec, "bequipallactors", equipAllActors);
 		keepEventFiles = GetI(a_sec, "ikeepeventfiles", keepEventFiles);
 
+		waitChains = GetB(a_sec, "bwaitchains", waitChains);
+
 		hotkeyEnabled = GetB(a_sec, "bhotkeyenabled", hotkeyEnabled);
 		hotkey = GetS(a_sec, "shotkey", hotkey);
 		hotkeyHoldSec = GetF(a_sec, "fhotkeyholdseconds", hotkeyHoldSec);
@@ -231,7 +233,7 @@ void Settings::LogValues() const
 		mainThreadStack, allThreadStacks, minidumpLevel, backupLogs, beep, flashWindow, alertOnWarning, ignoreUnfocused);
 	spdlog::info("Address Library IDs {}, thread sampling {} x {} ms ({}), dump via helper process {}", addressLibIDs, threadSamples,
 		sampleIntervalMs, allThreadStacks ? "all threads" : "main thread only", outOfProcessDump);
-	spdlog::info("Group identical stacks {}, skip dump if recovered {}", groupThreadStacks, skipDumpIfRecovered);
+	spdlog::info("Group identical stacks {}, skip dump if recovered {}, wait chains {}", groupThreadStacks, skipDumpIfRecovered, waitChains);
 	spdlog::info("Slow-episode sampling {}: hitch sample >= {:.2f}s, report >= {:.2f}s, load gap >= {:.1f}s, every {} ms, max {} reports",
 		slowSampling, hitchSampleSec, hitchReportSec, loadGapSampleSec, slowSampleIntervalMs, maxSlowReports);
 	spdlog::info("Context: actor breakdown {}, papyrus {}, vram {}, status file {}, events log {} (equip {}, all actors {})",

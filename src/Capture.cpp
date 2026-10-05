@@ -6,6 +6,8 @@
 #include "Settings.h"
 #include "Util.h"
 
+#include <wct.h>
+
 namespace Capture
 {
 	namespace
@@ -1195,6 +1197,207 @@ namespace Capture
 		return out;
 	}
 
+	// ---------- (version 6) wait chains: who is waiting for whom ----------
+	// Windows' Wait Chain Traversal (WCT) reports, for a blocked thread, the object it waits on and the thread that
+	// owns that object, following the chain further and flagging cycles (deadlocks). It reads this from Windows
+	// itself, without suspending anything, so it is safe even when the game is completely stuck.
+	// WCT understands critical sections, mutexes, SendMessage, ALPC/COM calls and waits on threads/processes.
+	// It cannot see owners of events, semaphores, SRW locks, condition variables or the game's own spin locks.
+	namespace
+	{
+		const char* WctTypeName(WCT_OBJECT_TYPE a_type)
+		{
+			switch (a_type) {
+			case WctCriticalSectionType: return "critical section";
+			case WctSendMessageType: return "SendMessage to a window";
+			case WctMutexType: return "mutex";
+			case WctAlpcType: return "ALPC call";
+			case WctComType: return "COM call";
+			case WctThreadWaitType: return "wait for a thread";
+			case WctProcessWaitType: return "wait for a process";
+			case WctThreadType: return "thread";
+			case WctComActivationType: return "COM activation";
+			case WctSocketIoType: return "socket I/O";
+			case WctSmbIoType: return "SMB I/O";
+			default: return "unknown object";
+			}
+		}
+
+		const char* WctStatusName(WCT_OBJECT_STATUS a_status)
+		{
+			switch (a_status) {
+			case WctStatusNoAccess: return "no access";
+			case WctStatusRunning: return "running";
+			case WctStatusBlocked: return "blocked";
+			case WctStatusPidOnly: return "pid only";
+			case WctStatusPidOnlyRpcss: return "pid only (rpcss)";
+			case WctStatusOwned: return "owned";
+			case WctStatusNotOwned: return "not owned";
+			case WctStatusAbandoned: return "abandoned";
+			case WctStatusUnknown: return "unknown";
+			case WctStatusError: return "error";
+			default: return "?";
+			}
+		}
+
+		std::string Narrow(const wchar_t* a_w)
+		{
+			std::string s;
+			for (; a_w && *a_w && s.size() < 120; ++a_w) {
+				s += (*a_w < 128) ? static_cast<char>(*a_w) : '?';
+			}
+			return s;
+		}
+
+		struct WaitChain
+		{
+			DWORD                            tid = 0;
+			std::vector<WAITCHAIN_NODE_INFO> nodes;
+			bool                             cycle = false;
+		};
+
+		// Returns the chains worth reporting: every thread blocked on something another thread owns, plus the main
+		// thread's chain whatever it is.
+		std::vector<WaitChain> CollectWaitChains(DWORD a_mainTid)
+		{
+			std::vector<WaitChain> out;
+			const HWCT session = OpenThreadWaitChainSession(0, nullptr);
+			if (!session) {
+				spdlog::warn("Wait chain analysis unavailable (OpenThreadWaitChainSession error {})", GetLastError());
+				return out;
+			}
+			const DWORD self = GetCurrentThreadId();
+			for (const auto tid : ThreadIds()) {
+				if (tid == self) {
+					continue;
+				}
+				WAITCHAIN_NODE_INFO nodes[WCT_MAX_NODE_COUNT]{};
+				DWORD               count = WCT_MAX_NODE_COUNT;
+				BOOL                cycle = FALSE;
+				if (!GetThreadWaitChain(session, 0, WCT_OUT_OF_PROC_FLAG | WCT_OUT_OF_PROC_CS_FLAG, tid, &count, nodes, &cycle)) {
+					continue;
+				}
+				// nodes[0] = this thread, [1] = what it waits on, [2] = the owner thread, and so on
+				const bool hasOwner = count >= 3;
+				if (!hasOwner && !cycle && tid != a_mainTid) {
+					continue;
+				}
+				WaitChain c;
+				c.tid = tid;
+				c.cycle = cycle != FALSE;
+				c.nodes.assign(nodes, nodes + std::min<DWORD>(count, WCT_MAX_NODE_COUNT));
+				out.push_back(std::move(c));
+			}
+			CloseThreadWaitChainSession(session);
+			return out;
+		}
+
+		std::string ThreadLabel(DWORD a_tid, DWORD a_pid, DWORD a_mainTid)
+		{
+			std::string s = std::format("thread {}", a_tid);
+			if (a_tid == a_mainTid) {
+				s += " (MAIN)";
+			}
+			if (a_pid != 0 && a_pid != GetCurrentProcessId()) {
+				s += std::format(" in process {}", a_pid);
+			}
+			return s;
+		}
+
+		// Appends the [WAIT CHAINS] section and the stacks of the threads involved. Returns true if a deadlock
+		// (cycle) was found.
+		bool AppendWaitChains(std::string& a_out, DWORD a_mainTid, const std::vector<Module>& a_mods, const ThreadStack* a_mainStack,
+			const std::vector<ThreadStack>& a_captured)
+		{
+			const auto chains = CollectWaitChains(a_mainTid);
+			a_out += "\n[WAIT CHAINS] who is waiting for whom (Windows Wait Chain Traversal)\n";
+			a_out += "  Covers critical sections, mutexes, SendMessage, COM/ALPC calls and thread/process waits. It cannot see the\n"
+			         "  owner of events, semaphores, SRW locks or the game's own spin locks, so 'no owner known' is common and normal.\n";
+
+			bool                deadlock = false;
+			std::vector<DWORD>  involved;
+			auto addInvolved = [&](DWORD a_tid) {
+				if (a_tid != 0 && std::find(involved.begin(), involved.end(), a_tid) == involved.end()) {
+					involved.push_back(a_tid);
+				}
+			};
+
+			if (chains.empty()) {
+				a_out += "  No thread is waiting on a lock that another thread owns (as far as Windows can tell).\n";
+			}
+			for (const auto& c : chains) {
+				std::string line;
+				for (std::size_t i = 0; i < c.nodes.size(); ++i) {
+					const auto& n = c.nodes[i];
+					if (n.ObjectType == WctThreadType) {
+						const DWORD tid = n.ThreadObject.ThreadId;
+						const DWORD pid = n.ThreadObject.ProcessId;
+						if (i == 0) {
+							line += ThreadLabel(tid, pid, a_mainTid);
+							if (n.ObjectStatus == WctStatusBlocked) {
+								line += std::format(" [blocked, waiting {} ms]", n.ThreadObject.WaitTime);
+							} else {
+								line += std::format(" [{}]", WctStatusName(n.ObjectStatus));
+							}
+						} else {
+							line += " --owned by--> " + ThreadLabel(tid, pid, a_mainTid);
+							line += std::format(" [{}]", WctStatusName(n.ObjectStatus));
+						}
+						if (pid == 0 || pid == GetCurrentProcessId()) {
+							addInvolved(tid);
+						}
+					} else {
+						line += std::format(" --waits for--> {} ({})", WctTypeName(n.ObjectType), WctStatusName(n.ObjectStatus));
+						const auto name = Narrow(n.LockObject.ObjectName);
+						if (!name.empty()) {
+							line += " '" + name + "'";
+						}
+					}
+				}
+				if (c.nodes.size() < 3) {
+					line += c.nodes.size() == 1 ? "  (not waiting on anything WCT can follow)" : "  (no owner known)";
+				}
+				if (c.cycle) {
+					deadlock = true;
+					a_out += "  DEADLOCK (the chain loops back on itself): " + line + "\n";
+				} else {
+					a_out += "  " + line + "\n";
+				}
+			}
+
+			// Stacks of the threads in the chains, so the report shows WHERE the waiter and the owner are
+			int shown = 0;
+			for (const auto tid : involved) {
+				if (shown >= 8) {
+					a_out += "  (more threads involved; stacks of the first 8 shown)\n";
+					break;
+				}
+				const ThreadStack* known = nullptr;
+				if (a_mainStack && tid == a_mainStack->tid) {
+					continue;  // the main thread's stack is already in the report
+				}
+				for (const auto& ts : a_captured) {
+					if (ts.tid == tid) {
+						known = &ts;
+						break;
+					}
+				}
+				ThreadStack fresh;
+				if (!known) {
+					if (!CaptureThread(tid, fresh, false)) {
+						continue;
+					}
+					known = &fresh;
+				}
+				a_out += "\n";
+				AppendStack(a_out, std::format("WAIT CHAIN thread {}", tid), *known, a_mods);
+				++shown;
+			}
+			a_out += "\n";
+			return deadlock;
+		}
+	}
+
 	void Init()
 	{
 		// Log backup keeps every log written since the GAME started (not since this plugin loaded), minus a
@@ -1329,7 +1532,7 @@ namespace Capture
 		const auto hist = SummarizeHistory(mods, 3);
 
 		std::string report;
-		report += std::format("The Watcher version 5 {} #{}  {}\n", a_manual ? "manual capture" : "stall capture", a_index, Util::Stamp(false));
+		report += std::format("The Watcher version 6 {} #{}  {}\n", a_manual ? "manual capture" : "stall capture", a_index, Util::Stamp(false));
 		report += std::format("Reason: {}\n", a_reason);
 		report += std::format("Frame heartbeat age at stack capture: {:.0f} ms | Loading screen: {}\n", hbMs, loading ? "open" : "closed");
 		if (recovered) {
@@ -1372,10 +1575,19 @@ namespace Capture
 			}
 		}
 
+		// (version 6) who is waiting for whom
+		if (cfg.waitChains) {
+			SetStep("wait chains");
+			if (AppendWaitChains(report, mainTid, mods, mainOk ? &mainStack : nullptr, others)) {
+				report.insert(0, "DEADLOCK DETECTED: see [WAIT CHAINS] below.\n");
+				Events::Write(std::format("DEADLOCK detected by wait chain analysis ({})", a_reason));
+			}
+		}
+
 		const auto mainSig = mainOk ? Signature(mainStack, mods) : std::string();
 		auto writeSummary = [&](const SamplingResult& a_sampling) {
 			const auto json = std::format(
-				"{{\n  \"watcher_version\":\"5\",\n  \"index\":{},\n  \"time\":{},\n  \"reason\":{},\n  \"recovered\":{},\n  \"heartbeat_age_ms\":{:.0f},\n"
+				"{{\n  \"watcher_version\":\"6\",\n  \"index\":{},\n  \"time\":{},\n  \"reason\":{},\n  \"recovered\":{},\n  \"heartbeat_age_ms\":{:.0f},\n"
 				"  \"loading\":{},\n  \"signature\":{},\n  \"main_stack_signature\":{},\n  \"context\":{},\n  \"history\":{},\n  \"main_stack\":{},\n"
 				"  \"sampling\":{{\"same\":{},\"changed\":{},\"incomplete\":{},\"main\":{}}},\n  \"thread_groups\":{}\n}}\n",
 				a_index, Util::Json(Util::Stamp(false)), Util::Json(a_reason), recovered ? "true" : "false", hbMs, loading ? "true" : "false",

@@ -1,5 +1,10 @@
 # Changelog
 
+## Version 6
+
+- New: wait chain analysis in every capture ([WAIT CHAINS] section). Windows reports which thread each blocked thread is waiting for and who owns the lock, follows the chain, and flags deadlocks (chains that loop back). The stacks of the threads involved are added to the report. Safe while the game is stuck: nothing is paused. Turn off with bWaitChains=0.
+- A detected deadlock is written at the top of the report and in the events log.
+
 ## Version 5
 
 - New: manual capture hotkey: hold F12 for 3 seconds (key and hold time set in the new [Hotkey] section of TheWatcher.ini; a quick tap does nothing, so the key keeps its normal use). Saves this session's logs, a report with thread stacks and the resource report, and optionally a minidump, to TheWatcher\manual_<date>_<time>_<n>\. Works while the game is frozen; only reacts while the game window is in front. Shows "The Watcher: logs and report saved" in game when done.

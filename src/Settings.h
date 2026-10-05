@@ -32,6 +32,7 @@ struct Settings
 	int  sampleIntervalMs = 200; // time between samples
 	bool groupThreadStacks = true;   // (1.1) print identical thread stacks once, with a thread count
 	bool skipDumpIfRecovered = true; // (1.1) no minidump / all-thread pass when the game was already running again
+	bool waitChains = true;          // (version 6) Windows wait chain analysis: who is waiting for whom
 
 	// [Sampling]  (1.1) main-thread stack history during hitches and slow loading gaps
 	bool  slowSampling = true;
