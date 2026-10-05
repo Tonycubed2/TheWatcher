@@ -53,7 +53,8 @@ struct Settings
 
 	// [Hotkey]  (version 5) save logs and a report on demand
 	bool        hotkeyEnabled = true;
-	std::string hotkey = "Shift+PrintScreen";
+	std::string hotkey = "F12";
+	float       hotkeyHoldSec = 3.0f;  // hold the key this long to capture (0 = capture on press)
 	bool        hotkeyMinidump = true;
 	int         keepManualCaptures = 10;
 

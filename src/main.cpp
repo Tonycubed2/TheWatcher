@@ -47,8 +47,8 @@ namespace
 				Events::Write(std::format("SESSION START  The Watcher version 5, game {}, pid {}", REL::Module::get().version().string(), GetCurrentProcessId()));
 			}
 			Monitor::RegisterEventSinks();
-			Watchdog::Start();
 			Hotkey::Start();
+			Watchdog::Start();
 		} else {
 			Monitor::NoteGameMessage(a_msg->type);  // (1.1) save load / new game / save: tags loading screens + events log
 		}

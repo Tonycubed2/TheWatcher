@@ -2,8 +2,8 @@
 
 ## Version 5
 
-- New: manual capture hotkey (default Shift+PrintScreen, set in the new [Hotkey] section of TheWatcher.ini). Saves this session's logs, a report with thread stacks and the resource report, and optionally a minidump, to TheWatcher\manual_<date>_<time>_<n>\. Works while the game is frozen; only reacts while the game window is in front. Shows "The Watcher: logs and report saved" in game when done.
-- New: resource report, "which mods are using CPU" (new [Resources] section). Shows CPU time by the DLL that owns each thread, and the busiest game threads' CPU time credited to the mod DLLs on their call stacks. Included in every capture report and written every minute to TheWatcher\resources_<date>_<time>.log.
+- New: manual capture hotkey: hold F12 for 3 seconds (key and hold time set in the new [Hotkey] section of TheWatcher.ini; a quick tap does nothing, so the key keeps its normal use). Saves this session's logs, a report with thread stacks and the resource report, and optionally a minidump, to TheWatcher\manual_<date>_<time>_<n>\. Works while the game is frozen; only reacts while the game window is in front. Shows "The Watcher: logs and report saved" in game when done.
+- New: resource report, "which mods are using CPU" (new [Resources] section). Shows CPU time by the DLL that owns each thread (threads started through the C runtime are traced back to the DLL that created them), which mod's code was running on the busiest game threads, and the nearest mod hook on their call stacks. Included in every capture report and written every minute to TheWatcher\resources_<date>_<time>.log.
 
 ## Version 4
 

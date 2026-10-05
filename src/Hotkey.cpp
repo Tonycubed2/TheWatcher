@@ -14,10 +14,12 @@ namespace Hotkey
 			bool alt = false;
 		};
 
-		Combo                     g_combo;
-		std::atomic<bool>         g_pressed{ false };
-		std::atomic<std::uint64_t> g_lastTriggerMs{ 0 };
-		bool                      g_downSeen = false;  // hook thread only
+		Combo                      g_combo;
+		std::uint64_t              g_holdMs = 0;  // 0 = fire on press; otherwise the key must be held this long
+		std::uint64_t              g_lastTriggerMs = 0;
+		std::uint64_t              g_downSinceMs = 0;  // when the key was first seen down (0 = up)
+		bool                       g_firedThisHold = false;
+		int                        g_debugLines = 0;
 
 		std::string LowerTrim(std::string a_s)
 		{
@@ -75,7 +77,7 @@ namespace Hotkey
 			return 0;
 		}
 
-		// "Shift+PrintScreen", "Ctrl+Alt+F12", "F9" ...
+		// "F12", "Shift+PrintScreen", "Ctrl+Alt+F12" ...
 		bool Parse(const std::string& a_text, Combo& a_out)
 		{
 			Combo       c;
@@ -127,63 +129,21 @@ namespace Hotkey
 			return pid == GetCurrentProcessId();
 		}
 
-		bool ModifiersMatch()
+		bool KeyDown(int a_vk) { return (GetAsyncKeyState(a_vk) & 0x8000) != 0; }
+
+		// Only the modifiers named in sHotkey are required; extra modifiers held at the same time do not block it
+		bool ModifiersOk()
 		{
-			const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
-			const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-			const bool alt = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
-			return shift == g_combo.shift && ctrl == g_combo.ctrl && alt == g_combo.alt;
+			return (!g_combo.shift || KeyDown(VK_SHIFT)) && (!g_combo.ctrl || KeyDown(VK_CONTROL)) && (!g_combo.alt || KeyDown(VK_MENU));
 		}
 
-		void Trigger()
+		bool Fire(std::uint64_t a_now)
 		{
-			const auto now = GetTickCount64();
-			if (now - g_lastTriggerMs.load() < 3000) {
-				return;  // one capture per 3 seconds at most
+			if (g_lastTriggerMs != 0 && a_now - g_lastTriggerMs < 3000) {
+				return false;  // one capture per 3 seconds at most
 			}
-			g_lastTriggerMs.store(now);
-			g_pressed.store(true);
-		}
-
-		LRESULT CALLBACK HookProc(int a_code, WPARAM a_wParam, LPARAM a_lParam)
-		{
-			if (a_code == HC_ACTION) {
-				const auto* key = reinterpret_cast<const KBDLLHOOKSTRUCT*>(a_lParam);
-				if (key && key->vkCode == g_combo.vk) {
-					const bool down = (a_wParam == WM_KEYDOWN || a_wParam == WM_SYSKEYDOWN);
-					if (down) {
-						if (!g_downSeen) {
-							g_downSeen = true;
-							if (ModifiersMatch() && GameInFront()) {
-								Trigger();
-							}
-						}
-					} else {
-						// Print Screen sometimes arrives as a key-up only; act on it then
-						if (!g_downSeen && ModifiersMatch() && GameInFront()) {
-							Trigger();
-						}
-						g_downSeen = false;
-					}
-				}
-			}
-			return CallNextHookEx(nullptr, a_code, a_wParam, a_lParam);
-		}
-
-		void HookThread()
-		{
-			const HHOOK hook = SetWindowsHookExW(WH_KEYBOARD_LL, HookProc, GetModuleHandleW(nullptr), 0);
-			if (!hook) {
-				spdlog::error("Manual capture hotkey could not be installed (error {}); the hotkey is off", GetLastError());
-				return;
-			}
-			// A low-level hook needs a message loop on the thread that installed it
-			MSG msg;
-			while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-				TranslateMessage(&msg);
-				DispatchMessageW(&msg);
-			}
-			UnhookWindowsHookEx(hook);
+			g_lastTriggerMs = a_now;
+			return true;
 		}
 	}
 
@@ -195,15 +155,50 @@ namespace Hotkey
 			return;
 		}
 		if (!Parse(cfg.hotkey, g_combo)) {
-			spdlog::error("sHotkey={} is not a key combination The Watcher understands; the hotkey is off. Example: Shift+PrintScreen", cfg.hotkey);
+			spdlog::error("sHotkey={} is not a key combination The Watcher understands; the hotkey is off. Example: F12", cfg.hotkey);
+			g_combo = Combo{};
 			return;
 		}
-		std::thread(HookThread).detach();
-		spdlog::info("Manual capture hotkey: {} (saves logs and a report on demand, works while the game is frozen)", cfg.hotkey);
+		g_holdMs = static_cast<std::uint64_t>(std::max(0.0f, cfg.hotkeyHoldSec) * 1000.0f);
+		if (g_holdMs > 0) {
+			spdlog::info("Manual capture hotkey: hold {} for {:.1f} seconds (works while the game is frozen)", cfg.hotkey, cfg.hotkeyHoldSec);
+		} else {
+			spdlog::info("Manual capture hotkey: press {} (works while the game is frozen)", cfg.hotkey);
+		}
 	}
 
+	// Called from the watchdog thread every 50 ms. The key is read with GetAsyncKeyState, the same way many SKSE
+	// plugins read keys; version 5's first build used a low-level keyboard hook, which never saw keys in game.
 	bool ConsumePressed()
 	{
-		return g_pressed.exchange(false);
+		if (g_combo.vk == 0) {
+			return false;
+		}
+		const auto now = GetTickCount64();
+		const bool down = KeyDown(static_cast<int>(g_combo.vk));
+		if (!down) {
+			g_downSinceMs = 0;
+			g_firedThisHold = false;
+			return false;
+		}
+
+		if (g_downSinceMs == 0) {  // just went down
+			g_downSinceMs = now;
+			g_firedThisHold = false;
+			if (g_debugLines++ < 6) {
+				spdlog::info("Hotkey: {} seen down (modifiers ok {}, game in front {})", Settings::Get().hotkey, ModifiersOk(), GameInFront());
+			}
+		}
+		if (g_firedThisHold || now - g_downSinceMs < g_holdMs) {
+			return false;
+		}
+		g_firedThisHold = true;  // once per press / hold
+		if (!ModifiersOk() || !GameInFront() || !Fire(now)) {
+			return false;
+		}
+		if (g_holdMs > 0) {
+			spdlog::info("Hotkey held for {:.1f}s: starting manual capture", static_cast<double>(g_holdMs) / 1000.0);
+		}
+		return true;
 	}
 }

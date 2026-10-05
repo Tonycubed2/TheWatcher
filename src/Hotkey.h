@@ -1,14 +1,14 @@
 #pragma once
 
 // (version 5) Manual capture hotkey.
-// A low-level keyboard hook on its own thread watches for the key combination from TheWatcher.ini [Hotkey].
-// It works even while the game is frozen (the hook thread is not the game's), and only reacts while the
-// game window is in front. The key is passed on to Windows and the game as normal; it is never swallowed.
+// The watchdog thread checks the key every 50 ms with GetAsyncKeyState, so it works even while the game is frozen
+// (the watchdog is not the game's thread). It only reacts while the game window is in front, and never blocks the
+// key: Windows, the game and other mods still see it.
 namespace Hotkey
 {
-	// Parse sHotkey from the INI and start the hook thread. Logs the result.
+	// Parse sHotkey / fHotkeyHoldSeconds from the INI. Logs the result. Call before the watchdog starts.
 	void Start();
 
-	// True once per press (cleared when read). Called from the watchdog thread.
+	// True once per press (or once per hold, in hold mode). Called from the watchdog thread every loop.
 	bool ConsumePressed();
 }

@@ -171,6 +171,7 @@ void Settings::Load()
 
 		hotkeyEnabled = GetB(a_sec, "bhotkeyenabled", hotkeyEnabled);
 		hotkey = GetS(a_sec, "shotkey", hotkey);
+		hotkeyHoldSec = GetF(a_sec, "fhotkeyholdseconds", hotkeyHoldSec);
 		hotkeyMinidump = GetB(a_sec, "bhotkeyminidump", hotkeyMinidump);
 		keepManualCaptures = GetI(a_sec, "ikeepmanualcaptures", keepManualCaptures);
 
@@ -212,6 +213,7 @@ void Settings::Load()
 	maxSlowReports = std::clamp(maxSlowReports, 0, 1000);
 	keepEventFiles = std::max(keepEventFiles, 1);
 	keepManualCaptures = std::max(keepManualCaptures, 1);
+	hotkeyHoldSec = std::clamp(hotkeyHoldSec, 0.0f, 30.0f);
 	resourceIntervalMs = std::clamp(resourceIntervalMs, 100, 5000);
 	resourceWindowSec = std::clamp(resourceWindowSec, 10, 600);
 	resourceTop = std::clamp(resourceTop, 1, 50);
@@ -234,8 +236,8 @@ void Settings::LogValues() const
 		slowSampling, hitchSampleSec, hitchReportSec, loadGapSampleSec, slowSampleIntervalMs, maxSlowReports);
 	spdlog::info("Context: actor breakdown {}, papyrus {}, vram {}, status file {}, events log {} (equip {}, all actors {})",
 		actorBreakdown, papyrusStats, vramStats, statusFile, eventsLog, equipEvents, equipAllActors);
-	spdlog::info("Hotkey: {} ({}), minidump on manual capture {}, keep {} manual captures", hotkeyEnabled ? "on" : "off", hotkey,
-		hotkeyMinidump, keepManualCaptures);
+	spdlog::info("Hotkey: {} ({}, hold {:.1f}s), minidump on manual capture {}, keep {} manual captures", hotkeyEnabled ? "on" : "off",
+		hotkey, hotkeyHoldSec, hotkeyMinidump, keepManualCaptures);
 	spdlog::info("Resource profiler {}: every {} ms, {}s window, top {}, sample up to {} busy game threads, resources log {}",
 		resourceProfiler, resourceIntervalMs, resourceWindowSec, resourceTop, resourceSampleThreads, resourceLog);
 }

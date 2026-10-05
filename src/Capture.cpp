@@ -848,13 +848,13 @@ namespace Capture
 
 	// ---------- (version 5) resource profiler: which mods are using CPU ----------
 	// Runs on the watchdog thread only (it shares g_work with the stack capture code).
-	// Two views, both in "% of one CPU core":
-	//   1. CPU by thread owner: every thread's CPU time, credited to the DLL whose code started the thread.
-	//      Catches mods that run their own busy threads (AI, networking, physics, scripts engines...).
-	//   2. Game-thread CPU with a mod on the call stack: the busiest game threads (main + job threads) are
-	//      sampled; their CPU time is credited to every mod DLL found on the stack at that moment. Mods hook
-	//      into game threads, so this is how a mod that slows the game's own work shows up. A mod listed here
-	//      had its hook in the call chain; that does not prove its own code is the slow part.
+	// Three views, all in "% of one CPU core":
+	//   1. CPU by thread owner: every thread's CPU time, credited to the DLL whose code runs the thread.
+	//      Threads started through the C runtime (std::thread etc.) are traced back to the DLL that created them.
+	//   2. Mod code running on game threads: the busiest game threads (main + job threads) are sampled; when the
+	//      code executing at that moment belongs to a mod DLL, that mod is credited. Strongest evidence.
+	//   3. Nearest mod on game-thread call stacks: the innermost mod DLL on the sampled stack, i.e. the mod whose
+	//      hook led into the busy game code. A pointer for where to look, not proof.
 	namespace
 	{
 		struct ProfThread
@@ -871,9 +871,10 @@ namespace Capture
 		struct ProfWindow
 		{
 			Tally         owner;
-			Tally         hook;
+			Tally         self;
+			Tally         nearest;
 			std::uint64_t gameCpu = 0;     // all game-thread CPU in the window
-			std::uint64_t sampledCpu = 0;  // the part of it that was sampled for the hook view
+			std::uint64_t sampledCpu = 0;  // the part of it that was sampled for the call-stack views
 			double        seconds = 0.0;
 		};
 
@@ -898,31 +899,75 @@ namespace Capture
 			return GetThreadTimes(a_thread, &c, &e, &k, &u) ? ToTicks(k) + ToTicks(u) : 0;
 		}
 
-		// Name of the DLL whose code the thread started in, and whether that is the game executable
-		std::string ThreadOwner(HANDLE a_thread, bool& a_game)
-		{
-			using NtQueryInformationThread_t = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
-			static const auto s_query = reinterpret_cast<NtQueryInformationThread_t>(
-				GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
-			static const auto s_exe = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-
-			a_game = false;
-			PVOID start = nullptr;
-			constexpr ULONG kThreadQuerySetWin32StartAddress = 9;
-			if (!s_query || s_query(a_thread, kThreadQuerySetWin32StartAddress, &start, sizeof(start), nullptr) != 0 || !start) {
-				return "(unknown)";
-			}
-			if (const auto m = FindModule(g_profMods, reinterpret_cast<std::uintptr_t>(start))) {
-				a_game = (m->base == s_exe);
-				return a_game ? std::string("game (") + m->name + ")" : m->name;
-			}
-			return "(no module)";
-		}
-
 		bool IsGameModule(const Module& a_m)
 		{
 			static const auto s_exe = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
 			return a_m.base == s_exe;
+		}
+
+		// DLLs loaded from the Windows folder (system DLLs, graphics drivers) are not mods. ENB's d3d11.dll etc.
+		// live in the game folder, so they still count as mods.
+		bool IsWindowsModule(const Module& a_m)
+		{
+			static std::unordered_map<std::uintptr_t, bool> s_cache;
+			if (const auto it = s_cache.find(a_m.base); it != s_cache.end()) {
+				return it->second;
+			}
+			wchar_t path[MAX_PATH]{};
+			wchar_t win[MAX_PATH]{};
+			GetModuleFileNameW(reinterpret_cast<HMODULE>(a_m.base), path, MAX_PATH);
+			const UINT len = GetSystemWindowsDirectoryW(win, MAX_PATH);
+			const bool result = len > 0 && _wcsnicmp(path, win, len) == 0;
+			s_cache[a_m.base] = result;
+			return result;
+		}
+
+		// Windows / C runtime modules that only start or host threads for someone else
+		bool IsPlumbing(const std::string& a_name)
+		{
+			static constexpr const char* kPlumbing[] = { "ucrtbase.dll", "ntdll.dll", "KERNEL32.DLL", "KERNELBASE.dll",
+				"MSVCP140.dll", "msvcp_win.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll", "combase.dll", "RPCRT4.dll" };
+			for (const auto p : kPlumbing) {
+				if (_stricmp(a_name.c_str(), p) == 0) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// Name of the DLL that runs the thread, and whether that is the game executable.
+		// Start address first; threads started through the C runtime are traced through one stack sample:
+		// the deepest non-plumbing frame (closest to the thread's start) is the DLL that created it.
+		std::string ThreadOwner(DWORD a_tid, HANDLE a_thread, bool& a_game)
+		{
+			using NtQueryInformationThread_t = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+			static const auto s_query = reinterpret_cast<NtQueryInformationThread_t>(
+				GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+
+			a_game = false;
+			PVOID start = nullptr;
+			constexpr ULONG kThreadQuerySetWin32StartAddress = 9;
+			const Module*   startMod = nullptr;
+			if (s_query && s_query(a_thread, kThreadQuerySetWin32StartAddress, &start, sizeof(start), nullptr) == 0 && start) {
+				startMod = FindModule(g_profMods, reinterpret_cast<std::uintptr_t>(start));
+			}
+			if (startMod && !IsPlumbing(startMod->name)) {
+				a_game = IsGameModule(*startMod);
+				return a_game ? std::string("game (") + startMod->name + ")" : startMod->name;
+			}
+
+			// Generic start (std::thread, _beginthreadex, thread pool): look at the stack once
+			ThreadStack ts;
+			if (CaptureThread(a_tid, ts, false)) {
+				for (std::size_t i = ts.count; i-- > 0;) {
+					const auto m = FindModule(g_profMods, ts.frames[i]);
+					if (m && !IsPlumbing(m->name) && !IsSystemModule(m->name)) {
+						a_game = IsGameModule(*m);
+						return a_game ? std::string("game (") + m->name + ")" : m->name + " (via C runtime thread)";
+					}
+				}
+			}
+			return startMod ? startMod->name + " (owner unknown)" : std::string("(owner unknown)");
 		}
 
 		void Add(ProfWindow& a_w, const ProfWindow& a_from)
@@ -930,8 +975,11 @@ namespace Capture
 			for (const auto& [k, v] : a_from.owner) {
 				a_w.owner[k] += v;
 			}
-			for (const auto& [k, v] : a_from.hook) {
-				a_w.hook[k] += v;
+			for (const auto& [k, v] : a_from.self) {
+				a_w.self[k] += v;
+			}
+			for (const auto& [k, v] : a_from.nearest) {
+				a_w.nearest[k] += v;
 			}
 			a_w.gameCpu += a_from.gameCpu;
 			a_w.sampledCpu += a_from.sampledCpu;
@@ -954,25 +1002,30 @@ namespace Capture
 			return v;
 		}
 
+		void FormatTally(std::string& a_out, std::string_view a_title, const Tally& a_recent, double a_recentSec, const Tally& a_session,
+			double a_sessionSec, int a_top, std::string_view a_recentLabel)
+		{
+			a_out += std::format("  {:<50} {:>8}  {:>8}\n", a_title, a_recentLabel, "session");
+			if (a_recent.empty()) {
+				a_out += "    (nothing measured yet)\n";
+			}
+			for (const auto& [name, ticks] : Top(a_recent, a_top)) {
+				const auto it = a_session.find(name);
+				a_out += std::format("    {:<48} {:7.1f}%  {:7.1f}%\n", name, Pct(ticks, a_recentSec),
+					Pct(it != a_session.end() ? it->second : 0, a_sessionSec));
+			}
+		}
+
 		std::string FormatWindow(const ProfWindow& a_recent, const ProfWindow& a_session, int a_top, std::string_view a_recentLabel)
 		{
 			std::string out;
-			out += std::format("  CPU by thread owner (% of one CPU core)        {:>8}  {:>8}\n", a_recentLabel, "session");
-			for (const auto& [name, ticks] : Top(a_recent.owner, a_top)) {
-				const auto it = a_session.owner.find(name);
-				out += std::format("    {:<44}  {:7.1f}%  {:7.1f}%\n", name, Pct(ticks, a_recent.seconds),
-					Pct(it != a_session.owner.end() ? it->second : 0, a_session.seconds));
-			}
-			out += std::format("  Game-thread CPU with this mod on the call stack {:>8}  {:>8}\n", a_recentLabel, "session");
-			if (a_recent.hook.empty()) {
-				out += "    (no busy game threads sampled yet)\n";
-			}
-			for (const auto& [name, ticks] : Top(a_recent.hook, a_top)) {
-				const auto it = a_session.hook.find(name);
-				out += std::format("    {:<44}  {:7.1f}%  {:7.1f}%\n", name, Pct(ticks, a_recent.seconds),
-					Pct(it != a_session.hook.end() ? it->second : 0, a_session.seconds));
-			}
-			out += std::format("  (game threads used {:.1f}% of a core recently; {:.0f}% of that was sampled for the call-stack view)\n",
+			FormatTally(out, "CPU by thread owner (% of one CPU core)", a_recent.owner, a_recent.seconds, a_session.owner, a_session.seconds,
+				a_top, a_recentLabel);
+			FormatTally(out, "Mod code running on game threads", a_recent.self, a_recent.seconds, a_session.self, a_session.seconds,
+				a_top, a_recentLabel);
+			FormatTally(out, "Nearest mod on game-thread call stacks", a_recent.nearest, a_recent.seconds, a_session.nearest,
+				a_session.seconds, a_top, a_recentLabel);
+			out += std::format("  (game threads used {:.1f}% of a core recently; {:.0f}% of that was sampled for the two game-thread views)\n",
 				Pct(a_recent.gameCpu, a_recent.seconds),
 				a_recent.gameCpu ? 100.0 * static_cast<double>(a_recent.sampledCpu) / static_cast<double>(a_recent.gameCpu) : 0.0);
 			return out;
@@ -1033,7 +1086,7 @@ namespace Capture
 				}
 				ProfThread pt;
 				pt.handle = h;
-				pt.owner = ThreadOwner(h, pt.game);
+				pt.owner = ThreadOwner(tid, h, pt.game);
 				pt.lastCpu = ThreadCpu(h);
 				pt.seen = true;
 				g_prof.emplace(tid, std::move(pt));
@@ -1062,7 +1115,7 @@ namespace Capture
 			}
 		}
 
-		// 2) Sample the busiest game threads and credit their CPU to the mods on their call stacks
+		// 2) Sample the busiest game threads
 		std::sort(busy.begin(), busy.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 		const auto minTicks = static_cast<std::uint64_t>(tickSec * 1e7 * 0.02);  // at least 2% of a core this tick
 		int sampled = 0;
@@ -1075,23 +1128,31 @@ namespace Capture
 				continue;
 			}
 			++sampled;
-			std::vector<std::string> onStack;
+			g_winCur.sampledCpu += delta;
+
+			// Executing code: the first frame that is not Windows / C runtime plumbing
+			std::string running = "(game code)";
+			std::string nearest = "(no mod on the stack)";
+			bool        runningFound = false;
 			for (std::size_t i = 0; i < ts.count; ++i) {
 				const auto m = FindModule(g_profMods, ts.frames[i]);
-				if (!m || IsSystemModule(m->name) || IsGameModule(*m) || _stricmp(m->name.c_str(), "TheWatcher.dll") == 0) {
+				if (!m || IsSystemModule(m->name) || IsPlumbing(m->name)) {
 					continue;
 				}
-				if (std::find(onStack.begin(), onStack.end(), m->name) == onStack.end()) {
-					onStack.push_back(m->name);
+				const bool watcher = _stricmp(m->name.c_str(), "TheWatcher.dll") == 0;
+				if (!runningFound) {
+					runningFound = true;
+					if (!IsGameModule(*m)) {
+						running = IsWindowsModule(*m) ? m->name + " (Windows/driver)" : m->name;
+					}
+				}
+				if (!IsGameModule(*m) && !watcher && !IsWindowsModule(*m)) {
+					nearest = m->name;  // innermost mod DLL on the stack
+					break;
 				}
 			}
-			if (onStack.empty()) {
-				onStack.emplace_back("(game code only, no mod on the stack)");
-			}
-			for (const auto& name : onStack) {
-				g_winCur.hook[name] += delta;
-			}
-			g_winCur.sampledCpu += delta;
+			g_winCur.self[running] += delta;
+			g_winCur.nearest[nearest] += delta;
 		}
 
 		// 3) Roll the window
@@ -1129,8 +1190,8 @@ namespace Capture
 		}
 		std::string out = std::format("[RESOURCES] which mods are using CPU: last {:.0f}s, and the whole session ({:.0f}s)\n", recent.seconds, session.seconds);
 		out += FormatWindow(recent, session, cfg.resourceTop, "recent");
-		out += "  A mod in the call-stack list had its hook in the busy game code when it was sampled; that points where to look,\n"
-		       "  it does not prove that mod's own code is the slow part.\n\n";
+		out += "  'Mod code running' = that mod's own code was executing when sampled (strongest evidence).\n"
+		       "  'Nearest mod' = the innermost mod whose hook led into the busy game code: a pointer for where to look, not proof.\n\n";
 		return out;
 	}
 
