@@ -8,7 +8,13 @@ namespace Capture
 	// Grab stacks, back up logs, alert, write minidump. Runs on the watchdog thread.
 	// (1.1) Returns false when the game was already running again by the time the stack was taken ("recovered"):
 	// the capture is then written without a minidump and should not count against the per-session limit.
-	bool Run(const std::string& a_reason, int a_index, const std::filesystem::path& a_statsFile);
+	// (version 5) a_manual = requested with the hotkey: saved to manual_<time>_<n>, never treated as "recovered",
+	// minidump only if bHotkeyMinidump=1.
+	bool Run(const std::string& a_reason, int a_index, const std::filesystem::path& a_statsFile, bool a_manual = false);
+
+	// (version 5) resource profiler. ResourceTick runs on the watchdog thread every loop; it does its own timing.
+	void        ResourceTick(std::int64_t a_nowNs);
+	std::string ResourceReport(std::int64_t a_nowNs);
 
 	// Short single beep (used for warnings)
 	void WarnBeep();

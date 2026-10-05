@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 # DLL name: TheWatcher.dll
-project(TheWatcher VERSION 4.0.0 LANGUAGES CXX)
+project(TheWatcher VERSION 5.0.0 LANGUAGES CXX)
 
 # Build output stays in the build folder only (build\release-msvc or build\debug-msvc).
 # Nothing is copied anywhere else; copy TheWatcher.dll, TheWatcher.pdb and TheWatcher.ini yourself.

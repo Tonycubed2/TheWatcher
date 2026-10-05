@@ -1,5 +1,10 @@
 # Changelog
 
+## Version 5
+
+- New: manual capture hotkey (default Shift+PrintScreen, set in the new [Hotkey] section of TheWatcher.ini). Saves this session's logs, a report with thread stacks and the resource report, and optionally a minidump, to TheWatcher\manual_<date>_<time>_<n>\. Works while the game is frozen; only reacts while the game window is in front. Shows "The Watcher: logs and report saved" in game when done.
+- New: resource report, "which mods are using CPU" (new [Resources] section). Shows CPU time by the DLL that owns each thread, and the busiest game threads' CPU time credited to the mod DLLs on their call stacks. Included in every capture report and written every minute to TheWatcher\resources_<date>_<time>.log.
+
 ## Version 4
 
 - Fixed a crash at startup on Skyrim VR 1.4.15: the fast-travel-end event source does not exist there, and registering on it crashed. Every game-event registration now checks that the event exists on the running game and skips it (with a log line) if not.

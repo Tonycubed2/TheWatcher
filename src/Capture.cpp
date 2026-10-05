@@ -846,6 +846,294 @@ namespace Capture
 		}
 	}
 
+	// ---------- (version 5) resource profiler: which mods are using CPU ----------
+	// Runs on the watchdog thread only (it shares g_work with the stack capture code).
+	// Two views, both in "% of one CPU core":
+	//   1. CPU by thread owner: every thread's CPU time, credited to the DLL whose code started the thread.
+	//      Catches mods that run their own busy threads (AI, networking, physics, scripts engines...).
+	//   2. Game-thread CPU with a mod on the call stack: the busiest game threads (main + job threads) are
+	//      sampled; their CPU time is credited to every mod DLL found on the stack at that moment. Mods hook
+	//      into game threads, so this is how a mod that slows the game's own work shows up. A mod listed here
+	//      had its hook in the call chain; that does not prove its own code is the slow part.
+	namespace
+	{
+		struct ProfThread
+		{
+			HANDLE        handle = nullptr;
+			std::string   owner;
+			bool          game = false;
+			std::uint64_t lastCpu = 0;
+			bool          seen = false;
+		};
+
+		using Tally = std::unordered_map<std::string, std::uint64_t>;  // 100 ns units of CPU time
+
+		struct ProfWindow
+		{
+			Tally         owner;
+			Tally         hook;
+			std::uint64_t gameCpu = 0;     // all game-thread CPU in the window
+			std::uint64_t sampledCpu = 0;  // the part of it that was sampled for the hook view
+			double        seconds = 0.0;
+		};
+
+		std::unordered_map<DWORD, ProfThread> g_prof;
+		std::vector<Module>                   g_profMods;
+		std::int64_t                          g_profModsNs = 0;
+		std::int64_t                          g_profLastNs = 0;
+		std::int64_t                          g_windowStartNs = 0;
+		ProfWindow                            g_winCur;
+		ProfWindow                            g_winLast;
+		ProfWindow                            g_winSession;
+		std::filesystem::path                 g_resPath;
+
+		std::uint64_t ToTicks(const FILETIME& a_ft)
+		{
+			return (static_cast<std::uint64_t>(a_ft.dwHighDateTime) << 32) | a_ft.dwLowDateTime;
+		}
+
+		std::uint64_t ThreadCpu(HANDLE a_thread)
+		{
+			FILETIME c{}, e{}, k{}, u{};
+			return GetThreadTimes(a_thread, &c, &e, &k, &u) ? ToTicks(k) + ToTicks(u) : 0;
+		}
+
+		// Name of the DLL whose code the thread started in, and whether that is the game executable
+		std::string ThreadOwner(HANDLE a_thread, bool& a_game)
+		{
+			using NtQueryInformationThread_t = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+			static const auto s_query = reinterpret_cast<NtQueryInformationThread_t>(
+				GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
+			static const auto s_exe = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+
+			a_game = false;
+			PVOID start = nullptr;
+			constexpr ULONG kThreadQuerySetWin32StartAddress = 9;
+			if (!s_query || s_query(a_thread, kThreadQuerySetWin32StartAddress, &start, sizeof(start), nullptr) != 0 || !start) {
+				return "(unknown)";
+			}
+			if (const auto m = FindModule(g_profMods, reinterpret_cast<std::uintptr_t>(start))) {
+				a_game = (m->base == s_exe);
+				return a_game ? std::string("game (") + m->name + ")" : m->name;
+			}
+			return "(no module)";
+		}
+
+		bool IsGameModule(const Module& a_m)
+		{
+			static const auto s_exe = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+			return a_m.base == s_exe;
+		}
+
+		void Add(ProfWindow& a_w, const ProfWindow& a_from)
+		{
+			for (const auto& [k, v] : a_from.owner) {
+				a_w.owner[k] += v;
+			}
+			for (const auto& [k, v] : a_from.hook) {
+				a_w.hook[k] += v;
+			}
+			a_w.gameCpu += a_from.gameCpu;
+			a_w.sampledCpu += a_from.sampledCpu;
+			a_w.seconds += a_from.seconds;
+		}
+
+		// "% of one CPU core" for a tally entry over a window
+		double Pct(std::uint64_t a_ticks, double a_seconds)
+		{
+			return a_seconds > 0.0 ? 100.0 * static_cast<double>(a_ticks) / (a_seconds * 1e7) : 0.0;
+		}
+
+		std::vector<std::pair<std::string, std::uint64_t>> Top(const Tally& a_t, int a_n)
+		{
+			std::vector<std::pair<std::string, std::uint64_t>> v(a_t.begin(), a_t.end());
+			std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+			if (static_cast<int>(v.size()) > a_n) {
+				v.resize(static_cast<std::size_t>(a_n));
+			}
+			return v;
+		}
+
+		std::string FormatWindow(const ProfWindow& a_recent, const ProfWindow& a_session, int a_top, std::string_view a_recentLabel)
+		{
+			std::string out;
+			out += std::format("  CPU by thread owner (% of one CPU core)        {:>8}  {:>8}\n", a_recentLabel, "session");
+			for (const auto& [name, ticks] : Top(a_recent.owner, a_top)) {
+				const auto it = a_session.owner.find(name);
+				out += std::format("    {:<44}  {:7.1f}%  {:7.1f}%\n", name, Pct(ticks, a_recent.seconds),
+					Pct(it != a_session.owner.end() ? it->second : 0, a_session.seconds));
+			}
+			out += std::format("  Game-thread CPU with this mod on the call stack {:>8}  {:>8}\n", a_recentLabel, "session");
+			if (a_recent.hook.empty()) {
+				out += "    (no busy game threads sampled yet)\n";
+			}
+			for (const auto& [name, ticks] : Top(a_recent.hook, a_top)) {
+				const auto it = a_session.hook.find(name);
+				out += std::format("    {:<44}  {:7.1f}%  {:7.1f}%\n", name, Pct(ticks, a_recent.seconds),
+					Pct(it != a_session.hook.end() ? it->second : 0, a_session.seconds));
+			}
+			out += std::format("  (game threads used {:.1f}% of a core recently; {:.0f}% of that was sampled for the call-stack view)\n",
+				Pct(a_recent.gameCpu, a_recent.seconds),
+				a_recent.gameCpu ? 100.0 * static_cast<double>(a_recent.sampledCpu) / static_cast<double>(a_recent.gameCpu) : 0.0);
+			return out;
+		}
+
+		void WriteResourceLog()
+		{
+			const auto& cfg = Settings::Get();
+			if (g_resPath.empty()) {
+				const auto dir = Util::WatchdogDir();
+				std::error_code ec;
+				std::filesystem::create_directories(dir, ec);
+				Util::Prune(dir, "resources_", cfg.keepEventFiles - 1);
+				g_resPath = dir / std::format("resources_{}.log", Util::Stamp(true));
+			}
+			std::ofstream out(g_resPath, std::ios::app);
+			out << std::format("===== {}  last {:.0f}s  |  {}\n", Util::Stamp(false), g_winLast.seconds, Monitor::ContextLine());
+			out << FormatWindow(g_winLast, g_winSession, cfg.resourceTop, "last");
+			out << "\n";
+		}
+	}
+
+	void ResourceTick(std::int64_t a_nowNs)
+	{
+		const auto& cfg = Settings::Get();
+		if (!cfg.resourceProfiler) {
+			return;
+		}
+		const std::int64_t interval = static_cast<std::int64_t>(cfg.resourceIntervalMs) * 1'000'000;
+		if (g_profLastNs != 0 && a_nowNs - g_profLastNs < interval) {
+			return;
+		}
+		const double tickSec = g_profLastNs ? static_cast<double>(a_nowNs - g_profLastNs) / 1e9 : 0.0;
+		g_profLastNs = a_nowNs;
+		if (g_windowStartNs == 0) {
+			g_windowStartNs = a_nowNs;
+		}
+		if (g_profMods.empty() || a_nowNs - g_profModsNs > 30'000'000'000LL) {
+			g_profMods = EnumModules();
+			g_profModsNs = a_nowNs;
+		}
+
+		// 1) CPU time of every thread since the last tick
+		const DWORD self = GetCurrentThreadId();
+		for (auto& [tid, t] : g_prof) {
+			t.seen = false;
+		}
+		std::vector<std::pair<DWORD, std::uint64_t>> busy;
+		for (const auto tid : ThreadIds()) {
+			if (tid == self) {
+				continue;
+			}
+			auto it = g_prof.find(tid);
+			if (it == g_prof.end()) {
+				const HANDLE h = OpenThread(THREAD_QUERY_INFORMATION, FALSE, tid);
+				if (!h) {
+					continue;
+				}
+				ProfThread pt;
+				pt.handle = h;
+				pt.owner = ThreadOwner(h, pt.game);
+				pt.lastCpu = ThreadCpu(h);
+				pt.seen = true;
+				g_prof.emplace(tid, std::move(pt));
+				continue;  // measured from the next tick on
+			}
+			auto& pt = it->second;
+			pt.seen = true;
+			const auto cpu = ThreadCpu(pt.handle);
+			const auto delta = cpu > pt.lastCpu ? cpu - pt.lastCpu : 0;
+			pt.lastCpu = cpu;
+			if (delta == 0) {
+				continue;
+			}
+			g_winCur.owner[pt.owner] += delta;
+			if (pt.game) {
+				g_winCur.gameCpu += delta;
+				busy.emplace_back(tid, delta);
+			}
+		}
+		for (auto it = g_prof.begin(); it != g_prof.end();) {
+			if (!it->second.seen) {
+				CloseHandle(it->second.handle);
+				it = g_prof.erase(it);
+			} else {
+				++it;
+			}
+		}
+
+		// 2) Sample the busiest game threads and credit their CPU to the mods on their call stacks
+		std::sort(busy.begin(), busy.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+		const auto minTicks = static_cast<std::uint64_t>(tickSec * 1e7 * 0.02);  // at least 2% of a core this tick
+		int sampled = 0;
+		for (const auto& [tid, delta] : busy) {
+			if (sampled >= cfg.resourceSampleThreads || delta < minTicks) {
+				break;
+			}
+			ThreadStack ts;
+			if (!CaptureThread(tid, ts, false)) {
+				continue;
+			}
+			++sampled;
+			std::vector<std::string> onStack;
+			for (std::size_t i = 0; i < ts.count; ++i) {
+				const auto m = FindModule(g_profMods, ts.frames[i]);
+				if (!m || IsSystemModule(m->name) || IsGameModule(*m) || _stricmp(m->name.c_str(), "TheWatcher.dll") == 0) {
+					continue;
+				}
+				if (std::find(onStack.begin(), onStack.end(), m->name) == onStack.end()) {
+					onStack.push_back(m->name);
+				}
+			}
+			if (onStack.empty()) {
+				onStack.emplace_back("(game code only, no mod on the stack)");
+			}
+			for (const auto& name : onStack) {
+				g_winCur.hook[name] += delta;
+			}
+			g_winCur.sampledCpu += delta;
+		}
+
+		// 3) Roll the window
+		const double winSec = static_cast<double>(a_nowNs - g_windowStartNs) / 1e9;
+		if (winSec >= static_cast<double>(cfg.resourceWindowSec)) {
+			g_winCur.seconds = winSec;
+			Add(g_winSession, g_winCur);
+			g_winLast = std::move(g_winCur);
+			g_winCur = ProfWindow{};
+			g_windowStartNs = a_nowNs;
+			if (cfg.resourceLog) {
+				try {
+					WriteResourceLog();
+				} catch (...) {
+				}
+			}
+		}
+	}
+
+	std::string ResourceReport(std::int64_t a_nowNs)
+	{
+		const auto& cfg = Settings::Get();
+		if (!cfg.resourceProfiler) {
+			return {};
+		}
+		// Recent = the last full window plus whatever has been collected since
+		ProfWindow recent = g_winLast;
+		ProfWindow cur = g_winCur;
+		cur.seconds = g_windowStartNs ? static_cast<double>(a_nowNs - g_windowStartNs) / 1e9 : 0.0;
+		Add(recent, cur);
+		ProfWindow session = g_winSession;
+		Add(session, cur);
+		if (recent.seconds <= 0.0) {
+			return "[RESOURCES] not enough data yet (the profiler needs a few seconds of play)\n\n";
+		}
+		std::string out = std::format("[RESOURCES] which mods are using CPU: last {:.0f}s, and the whole session ({:.0f}s)\n", recent.seconds, session.seconds);
+		out += FormatWindow(recent, session, cfg.resourceTop, "recent");
+		out += "  A mod in the call-stack list had its hook in the busy game code when it was sampled; that points where to look,\n"
+		       "  it does not prove that mod's own code is the slow part.\n\n";
+		return out;
+	}
+
 	void Init()
 	{
 		// Log backup keeps every log written since the GAME started (not since this plugin loaded), minus a
@@ -925,12 +1213,14 @@ namespace Capture
 		return sum.signature;
 	}
 
-	bool Run(const std::string& a_reason, int a_index, const std::filesystem::path& a_statsFile)
+	bool Run(const std::string& a_reason, int a_index, const std::filesystem::path& a_statsFile, bool a_manual)
 	{
 		const auto& cfg = Settings::Get();
 		auto&       s = Monitor::Get();
 
-		const auto folder = Util::WatchdogDir() / std::format("stall_{}_{}", Util::Stamp(true), a_index);
+		const char* prefix = a_manual ? "manual_" : "stall_";
+		const char* kind = a_manual ? "MANUAL CAPTURE" : "STALL CAPTURE";
+		const auto  folder = Util::WatchdogDir() / std::format("{}{}_{}", prefix, Util::Stamp(true), a_index);
 		std::error_code ec;
 		std::filesystem::create_directories(folder, ec);
 
@@ -955,7 +1245,8 @@ namespace Capture
 		const double hbMs = lastFrame ? static_cast<double>(now - lastFrame) / 1e6 : -1.0;
 		const double progressMs = static_cast<double>(now - s.lastProgressNs.load()) / 1e6;
 		// Recovered: the stall ended between detection and capture, so the live stack shows ordinary work
-		const bool recovered = loading ? progressMs < 1000.0 : (hbMs >= 0.0 && hbMs < 1000.0);
+		// A manual capture is taken on request, usually while the game runs fine, so it is never "recovered"
+		const bool recovered = !a_manual && (loading ? progressMs < 1000.0 : (hbMs >= 0.0 && hbMs < 1000.0));
 		const bool light = recovered && cfg.skipDumpIfRecovered;
 
 		std::vector<ThreadStack> others;
@@ -977,7 +1268,7 @@ namespace Capture
 		const auto hist = SummarizeHistory(mods, 3);
 
 		std::string report;
-		report += std::format("The Watcher version 4 stall capture #{}  {}\n", a_index, Util::Stamp(false));
+		report += std::format("The Watcher version 5 {} #{}  {}\n", a_manual ? "manual capture" : "stall capture", a_index, Util::Stamp(false));
 		report += std::format("Reason: {}\n", a_reason);
 		report += std::format("Frame heartbeat age at stack capture: {:.0f} ms | Loading screen: {}\n", hbMs, loading ? "open" : "closed");
 		if (recovered) {
@@ -992,6 +1283,7 @@ namespace Capture
 				static_cast<double>(now - s.loadStartNs.load()) / 1e9, s.loadEvents.load(), s.loadMaxGapUs.load() / 1000.0, s.loadFrames.load());
 		}
 		report += std::format("Context: {}\n\n", Monitor::ContextLine());
+		report += ResourceReport(now);
 
 		if (!hist.text.empty()) {
 			report += hist.text + "\n";
@@ -1022,7 +1314,7 @@ namespace Capture
 		const auto mainSig = mainOk ? Signature(mainStack, mods) : std::string();
 		auto writeSummary = [&](const SamplingResult& a_sampling) {
 			const auto json = std::format(
-				"{{\n  \"watcher_version\":\"4\",\n  \"index\":{},\n  \"time\":{},\n  \"reason\":{},\n  \"recovered\":{},\n  \"heartbeat_age_ms\":{:.0f},\n"
+				"{{\n  \"watcher_version\":\"5\",\n  \"index\":{},\n  \"time\":{},\n  \"reason\":{},\n  \"recovered\":{},\n  \"heartbeat_age_ms\":{:.0f},\n"
 				"  \"loading\":{},\n  \"signature\":{},\n  \"main_stack_signature\":{},\n  \"context\":{},\n  \"history\":{},\n  \"main_stack\":{},\n"
 				"  \"sampling\":{{\"same\":{},\"changed\":{},\"incomplete\":{},\"main\":{}}},\n  \"thread_groups\":{}\n}}\n",
 				a_index, Util::Json(Util::Stamp(false)), Util::Json(a_reason), recovered ? "true" : "false", hbMs, loading ? "true" : "false",
@@ -1035,16 +1327,18 @@ namespace Capture
 		// 3) Save what we have right away, so a later step getting stuck can't lose it
 		SetStep("writing report");
 		if (recovered) {
-			spdlog::warn("===== STALL CAPTURE #{} (RECOVERED before capture) -> {} =====\n{}", a_index, folder.string(), report);
+			spdlog::warn("===== {} #{} (RECOVERED before capture) -> {} =====\n{}", kind, a_index, folder.string(), report);
+		} else if (a_manual) {
+			spdlog::warn("===== {} #{} -> {} =====\n{}", kind, a_index, folder.string(), report);
 		} else {
-			spdlog::critical("===== STALL CAPTURE #{} -> {} =====\n{}", a_index, folder.string(), report);
+			spdlog::critical("===== {} #{} -> {} =====\n{}", kind, a_index, folder.string(), report);
 		}
 		{
 			std::ofstream out(folder / "stacks.txt");
 			out << report;
 		}
 		writeSummary(SamplingResult{});
-		Events::Write(std::format("STALL CAPTURE #{}{} {} -> {}", a_index, recovered ? " (recovered)" : "", a_reason, folder.filename().string()));
+		Events::Write(std::format("{} #{}{} {} -> {}", kind, a_index, recovered ? " (recovered)" : "", a_reason, folder.filename().string()));
 
 		// 4) Back up this session's logs
 		if (cfg.backupLogs) {
@@ -1070,7 +1364,7 @@ namespace Capture
 			}
 
 			// 7) Minidump last: slowest step. Written by the helper process when available.
-			if (cfg.minidumpLevel > 0) {
+			if (cfg.minidumpLevel > 0 && (!a_manual || cfg.hotkeyMinidump)) {
 				if (cfg.minidumpLevel >= 3) {
 					spdlog::critical("Writing FULL memory dump; this can take minutes and 10-20+ GB of disk");
 				}
@@ -1093,10 +1387,16 @@ namespace Capture
 		}
 
 		SetStep("cleanup");
-		Util::Prune(Util::WatchdogDir(), "stall_", cfg.keepStallCaptures);
+		Util::Prune(Util::WatchdogDir(), prefix, a_manual ? cfg.keepManualCaptures : cfg.keepStallCaptures);
 		g_captureStartNs.store(0);
 		SetStep("");
-		spdlog::critical("===== capture #{} complete{} =====", a_index, recovered ? " (recovered)" : "");
+		spdlog::critical("===== {} #{} complete{} =====", a_manual ? "manual capture" : "capture", a_index, recovered ? " (recovered)" : "");
+		if (a_manual) {
+			// Confirmation in game (shows once the game is running; if it is frozen, the beeps are the confirmation)
+			if (const auto tasks = SKSE::GetTaskInterface()) {
+				tasks->AddTask([]() { RE::DebugNotification("The Watcher: logs and report saved"); });
+			}
+		}
 		return !light;
 	}
 }

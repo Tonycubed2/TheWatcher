@@ -7,4 +7,5 @@ set(headers ${headers}
     src/Capture.h
     src/AddressLib.h
     src/Events.h
+    src/Hotkey.h
 )

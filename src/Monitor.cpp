@@ -564,7 +564,7 @@ namespace Monitor
 		return true;
 	}
 
-	// Version 4: some event sources do not exist on every runtime. On Skyrim VR 1.4.15 the fast-travel-end source is
+	// (version 4) some event sources do not exist on every runtime. On Skyrim VR 1.4.15 the fast-travel-end source is
 	// missing, CommonLib returns a null source, and registering on it crashed the game at startup. Every
 	// script-event sink now checks its source first and is skipped (with a log line) if the runtime lacks it.
 	template <class Event, class Sink>

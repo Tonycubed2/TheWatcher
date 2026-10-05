@@ -51,6 +51,20 @@ struct Settings
 	bool equipAllActors = false;
 	int  keepEventFiles = 20;
 
+	// [Hotkey]  (version 5) save logs and a report on demand
+	bool        hotkeyEnabled = true;
+	std::string hotkey = "Shift+PrintScreen";
+	bool        hotkeyMinidump = true;
+	int         keepManualCaptures = 10;
+
+	// [Resources]  (version 5) which mods are using CPU
+	bool resourceProfiler = true;
+	int  resourceIntervalMs = 500;
+	int  resourceWindowSec = 60;
+	int  resourceTop = 10;
+	int  resourceSampleThreads = 6;
+	bool resourceLog = true;
+
 	[[nodiscard]] bool StatsEnabled() const { return mode == 2 || statsLog; }
 
 	static Settings& Get();

@@ -2,6 +2,7 @@
 #include "Watchdog.h"
 #include "Capture.h"
 #include "Events.h"
+#include "Hotkey.h"
 #include "Monitor.h"
 #include "Settings.h"
 #include "Util.h"
@@ -458,6 +459,18 @@ namespace Watchdog
 					if (cfg.statusFile && now - lastStatus >= 1'000'000'000) {
 						lastStatus = now;
 						WriteStatus(now, m);
+					}
+
+					// (version 5) resource profiler (does its own timing)
+					Capture::ResourceTick(now);
+
+					// (version 5) manual capture requested with the hotkey
+					if (Hotkey::ConsumePressed()) {
+						static int s_manual = 0;
+						const int  index = ++s_manual;
+						spdlog::warn("Manual capture #{} requested with the hotkey", index);
+						Events::Write(std::format("MANUAL CAPTURE #{} requested with the hotkey", index));
+						Capture::Run("manual capture requested with the hotkey", index, g_csvPath, true);
 					}
 				} catch (const std::exception& e) {
 					spdlog::error("Stall check error: {}", e.what());

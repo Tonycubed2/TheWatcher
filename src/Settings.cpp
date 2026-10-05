@@ -86,6 +86,14 @@ namespace
 		return a_def;
 	}
 
+	std::string GetS(std::string_view a_sec, std::string_view a_key, const std::string& a_def)
+	{
+		if (const auto v = Find(a_sec, a_key); v && !v->empty()) {
+			return *v;
+		}
+		return a_def;
+	}
+
 	bool GetB(std::string_view a_sec, std::string_view a_key, bool a_def)
 	{
 		if (const auto v = Find(a_sec, a_key)) {
@@ -160,12 +168,26 @@ void Settings::Load()
 		equipEvents = GetB(a_sec, "bequipevents", equipEvents);
 		equipAllActors = GetB(a_sec, "bequipallactors", equipAllActors);
 		keepEventFiles = GetI(a_sec, "ikeepeventfiles", keepEventFiles);
+
+		hotkeyEnabled = GetB(a_sec, "bhotkeyenabled", hotkeyEnabled);
+		hotkey = GetS(a_sec, "shotkey", hotkey);
+		hotkeyMinidump = GetB(a_sec, "bhotkeyminidump", hotkeyMinidump);
+		keepManualCaptures = GetI(a_sec, "ikeepmanualcaptures", keepManualCaptures);
+
+		resourceProfiler = GetB(a_sec, "bresourceprofiler", resourceProfiler);
+		resourceIntervalMs = GetI(a_sec, "iresourceintervalms", resourceIntervalMs);
+		resourceWindowSec = GetI(a_sec, "iresourcewindowseconds", resourceWindowSec);
+		resourceTop = GetI(a_sec, "iresourcetop", resourceTop);
+		resourceSampleThreads = GetI(a_sec, "iresourcesamplethreads", resourceSampleThreads);
+		resourceLog = GetB(a_sec, "bresourcelog", resourceLog);
 	};
 	readTuning("general");
 	readTuning("detection");
 	readTuning("capture");
 	readTuning("sampling");
 	readTuning("context");
+	readTuning("hotkey");
+	readTuning("resources");
 	if (mode == 2) {
 		readTuning("aggressive");
 	}
@@ -189,6 +211,11 @@ void Settings::Load()
 	slowSampleIntervalMs = std::clamp(slowSampleIntervalMs, 20, 1000);
 	maxSlowReports = std::clamp(maxSlowReports, 0, 1000);
 	keepEventFiles = std::max(keepEventFiles, 1);
+	keepManualCaptures = std::max(keepManualCaptures, 1);
+	resourceIntervalMs = std::clamp(resourceIntervalMs, 100, 5000);
+	resourceWindowSec = std::clamp(resourceWindowSec, 10, 600);
+	resourceTop = std::clamp(resourceTop, 1, 50);
+	resourceSampleThreads = std::clamp(resourceSampleThreads, 0, 32);
 }
 
 void Settings::LogValues() const
@@ -207,4 +234,8 @@ void Settings::LogValues() const
 		slowSampling, hitchSampleSec, hitchReportSec, loadGapSampleSec, slowSampleIntervalMs, maxSlowReports);
 	spdlog::info("Context: actor breakdown {}, papyrus {}, vram {}, status file {}, events log {} (equip {}, all actors {})",
 		actorBreakdown, papyrusStats, vramStats, statusFile, eventsLog, equipEvents, equipAllActors);
+	spdlog::info("Hotkey: {} ({}), minidump on manual capture {}, keep {} manual captures", hotkeyEnabled ? "on" : "off", hotkey,
+		hotkeyMinidump, keepManualCaptures);
+	spdlog::info("Resource profiler {}: every {} ms, {}s window, top {}, sample up to {} busy game threads, resources log {}",
+		resourceProfiler, resourceIntervalMs, resourceWindowSec, resourceTop, resourceSampleThreads, resourceLog);
 }
