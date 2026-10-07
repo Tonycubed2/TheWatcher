@@ -3,9 +3,12 @@
 #include "Capture.h"
 #include "Events.h"
 #include "Hotkey.h"
+#include "Independent.h"
+#include "IndependentDecision.h"
 #include "Monitor.h"
 #include "Settings.h"
 #include "Util.h"
+#include "StoragePolicy.h"
 
 #include <dxgi1_4.h>
 
@@ -28,6 +31,8 @@ namespace Watchdog
 			int          lastCaptureIndex = 0;
 		};
 		Episode g_ep;
+		IndependentDecision::Episode g_fallbackEpisode;
+		std::uint64_t g_fallbackEnd = 0;
 
 		// (1.1) A hitch or a slow loading gap, sampled while it lasts
 		struct Slow
@@ -55,16 +60,7 @@ namespace Watchdog
 		};
 		ProcSample g_lastProc;
 
-		bool GameHasFocus()
-		{
-			const HWND fg = GetForegroundWindow();
-			if (!fg) {
-				return false;
-			}
-			DWORD pid = 0;
-			GetWindowThreadProcessId(fg, &pid);
-			return pid == GetCurrentProcessId();
-		}
+		bool GameHasFocus() { return Util::GameWindowInFront(); }
 
 		std::uint64_t To100ns(const FILETIME& a_ft)
 		{
@@ -148,7 +144,7 @@ namespace Watchdog
 
 		struct Measure
 		{
-			bool   valid = false;    // false = nothing to judge (no frames yet, or alt-tabbed and ignored)
+			bool   valid = false;    // false = nothing to judge (no frames yet)
 			bool   loading = false;
 			double age = 0.0;        // seconds without a frame (in game) or without load progress (loading screen)
 		};
@@ -156,7 +152,6 @@ namespace Watchdog
 		Measure Take(std::int64_t a_now)
 		{
 			auto&       s = Monitor::Get();
-			const auto& cfg = Settings::Get();
 			Measure     m;
 			m.loading = s.loading.load();
 			if (m.loading) {
@@ -171,9 +166,7 @@ namespace Watchdog
 			}
 			if (!GameHasFocus()) {
 				s.focusGen.fetch_add(1);  // frames spanning the alt-tab are left out of the frame-time stats
-				if (cfg.ignoreUnfocused) {
-					return m;
-				}
+				// Keep frame-time stats separate, but NEVER suppress capture detection.
 			}
 			// No frames run during a loading screen, so the clock restarts when the loading screen closes.
 			// (v1.0.0 measured from the last pre-load frame and falsely reported a 16s stall right after a load.)
@@ -229,7 +222,8 @@ namespace Watchdog
 		void CheckSlow(std::int64_t a_now, const Measure& a_m)
 		{
 			const auto& cfg = Settings::Get();
-			if (!cfg.slowSampling) {
+			if (!cfg.slowSampling || (a_m.loading && cfg.reduceWorkDuringLoading)) {
+				if (g_slow.active) FinishSlow();
 				return;
 			}
 			const double threshold = a_m.loading ? cfg.loadGapSampleSec : cfg.hitchSampleSec;
@@ -261,7 +255,8 @@ namespace Watchdog
 			if (!g_ep.active) {
 				return;
 			}
-			spdlog::warn("Stall episode ended ({}) after ~{:.1f}s; captures taken: {}",
+			spdlog::info("{} ended ({}) after ~{:.1f}s; captures taken: {}",
+				g_ep.loading ? "Observed loading gap" : "Stall episode",
 				a_why, static_cast<double>(Monitor::NowNs() - g_ep.startNs) / 1e9, g_ep.captures);
 			g_ep = {};
 		}
@@ -271,10 +266,16 @@ namespace Watchdog
 			auto&       s = Monitor::Get();
 			const auto& cfg = Settings::Get();
 			if (!a_m.valid) {
-				EndEpisode(s.lastFrameNs.load() == 0 ? "no frames yet" : "game not in focus");
+				EndEpisode(s.lastFrameNs.load() == 0 ? "no frames yet" : "heartbeat unavailable");
 				return;
 			}
 			const double age = a_m.age;
+            const auto tick = GetTickCount64();
+            const auto ageMs = static_cast<std::uint64_t>(std::max(0.0, age) * 1000.0);
+            const auto heartbeat = a_m.valid && tick > ageMs ? tick - ageMs : 0;
+            const bool fallbackDue = g_fallbackEpisode.ObserveState(tick, heartbeat,
+                static_cast<std::uint64_t>((a_m.loading ? cfg.loadStallSec : cfg.frameStallSec) * 1000),
+                false, g_fallbackEnd, a_m.loading, cfg.captureLoadingStalls);
 			const double warn = a_m.loading ? cfg.loadWarnSec : cfg.frameStallSec;
 			const double stall = a_m.loading ? cfg.loadStallSec : cfg.frameStallSec;
 			const char*  kind = a_m.loading ? "loading screen made no load progress" : "main thread did not finish a frame";
@@ -293,26 +294,30 @@ namespace Watchdog
 				const auto   lastFrame = s.lastFrameNs.load();
 				const double hbMs = lastFrame ? static_cast<double>(a_now - lastFrame) / 1e6 : -1.0;
 				if (a_m.loading) {
-					spdlog::warn("WARNING: loading screen open {:.1f}s, no load progress for {:.1f}s "
+					spdlog::info("SLOW LOAD (not proof of a freeze): loading screen open {:.1f}s, no observed load progress for {:.1f}s "
 								 "(load events so far {}, longest gap {:.0f} ms, frames during load {}, frame heartbeat age {:.0f} ms) | {}",
 						static_cast<double>(a_now - s.loadStartNs.load()) / 1e9, age, s.loadEvents.load(),
-						s.loadMaxGapUs.load() / 1000.0, s.loadFrames.load(), hbMs, Monitor::ContextLine());
+						s.loadMaxGapUs.load() / 1000.0, s.loadFrames.load(), hbMs,
+						cfg.reduceWorkDuringLoading ? std::string("loading diagnostics reduced") : Monitor::ContextLine());
 				} else {
 					spdlog::warn("WARNING: main thread has not finished a frame for {:.1f}s | {}", age, Monitor::ContextLine());
 				}
-				Events::Write(std::format("WARNING {} for {:.1f}s", kind, age));
-				Capture::WarnBeep();
+				Events::Write(std::format("{} {} for {:.1f}s", a_m.loading ? "SLOW LOAD" : "WARNING", kind, age));
+				if (!a_m.loading && !Independent::Active()) Capture::WarnBeep();
 			}
 
+			// With a live helper, it alone owns automatic capture.
+			if (Independent::Active() || (a_m.loading && !cfg.captureLoadingStalls)) return;
 			const bool allowed = g_capturesThisSession < cfg.maxCaptures;
-			const bool due = g_ep.captures == 0 ?
-			                     age >= stall :
-			                     static_cast<double>(a_now - g_ep.lastCaptureNs) / 1e9 >= cfg.recaptureSec;
+			const bool due = fallbackDue && age >= stall;
 			if (allowed && due) {
 				const int index = ++g_capturesThisSession;
 				++g_ep.captures;
 				g_ep.lastCaptureNs = a_now;
-				const bool counted = Capture::Run(std::format("{} for {:.1f}s", kind, age), index, g_csvPath);
+				bool started = false;
+				const bool counted = Capture::Run(std::format("{} for {:.1f}s", kind, age), index, g_csvPath, false, false, &started);
+				if (!started) { --g_ep.captures; }
+				else { g_fallbackEpisode.Captured(); g_fallbackEnd = GetTickCount64(); }
 				if (!counted) {
 					--g_capturesThisSession;  // (1.1) a capture of an already-recovered stall does not use up the limit
 				}
@@ -428,15 +433,16 @@ namespace Watchdog
 			const auto   lastFrame = s.lastFrameNs.load();
 			const double hbMs = lastFrame ? static_cast<double>(a_now - lastFrame) / 1e6 : -1.0;
 			const char*  state = !a_m.valid ? (lastFrame == 0 ? "starting" : "unfocused") :
-			                     a_m.loading ? (a_m.age >= Settings::Get().loadWarnSec ? "loading_stuck" : "loading") :
+			                     a_m.loading ? (a_m.age >= Settings::Get().loadWarnSec ? "loading_slow" : "loading") :
 			                     a_m.age >= Settings::Get().frameStallSec ? "stalled" :
 			                     a_m.age >= Settings::Get().hitchSampleSec ? "hitching" : "running";
 			const auto text = std::format(
 				"{{\"time\":{},\"pid\":{},\"uptime_s\":{:.0f},\"state\":{},\"heartbeat_age_ms\":{:.0f},\"measured_age_s\":{:.2f},\"loading\":{},"
 				"\"load_number\":{},\"stall_episode\":{},\"captures\":{},\"slow_reports\":{},\"context\":{}}}\n",
 				Util::Json(Util::Stamp(false)), GetCurrentProcessId(), UptimeSeconds(), Util::Json(state), hbMs, a_m.age, a_m.loading ? "true" : "false",
-				s.loadCount.load() + (a_m.loading ? 1 : 0), g_ep.active ? "true" : "false", g_capturesThisSession, g_slowReports,
-				Util::Json(Monitor::ContextLine()));
+				s.loadCount.load() + (a_m.loading ? 1 : 0), (g_ep.active && !g_ep.loading) ? "true" : "false", g_capturesThisSession, g_slowReports,
+				Util::Json(a_m.loading && Settings::Get().reduceWorkDuringLoading ?
+					std::format("Loading diagnostics paused; observed load events {}", s.loadEvents.load()) : Monitor::ContextLine()));
 			Util::WriteFileAtomic(Util::WatchdogDir() / "status.json", text);
 		}
 
@@ -445,6 +451,9 @@ namespace Watchdog
 			spdlog::info("Watchdog thread running (thread {})", GetCurrentThreadId());
 			auto lastStats = Monitor::NowNs();
 			auto lastStatus = lastStats;
+			auto lastRetention = std::int64_t{0};
+			bool incompleteCleaned = false;
+			bool statsPaused = false;
 
 			while (g_running.load()) {
 				// (1.1) 50 ms tick (was 250 ms) so a hitch can be sampled while it is happening
@@ -453,30 +462,64 @@ namespace Watchdog
 				const auto& cfg = Settings::Get();
 
 				try {
+					const bool externalManual = Independent::PendingManual();
+                    const bool externalAutomatic = !externalManual && Independent::PendingAutomatic();
+                    const bool fallbackManual = !Independent::Active() && Hotkey::ConsumePressed();
+                    if (externalManual || externalAutomatic || fallbackManual) {
+                        static int detailed = 0;
+                        bool started = false;
+                        Capture::Run("independent capture completed; supplemental context report", detailed + 1,
+                            g_csvPath, externalManual || fallbackManual, externalManual || externalAutomatic, &started);
+                        if (started) {
+                            ++detailed;
+                            if (externalManual || externalAutomatic) Independent::Acknowledge(externalManual);
+                        }
+                    }
 					const auto m = Take(now);
 					CheckSlow(now, m);
 					CheckStall(now, m);
-					if (cfg.statusFile && now - lastStatus >= 1'000'000'000) {
+					const bool reducedLoad = m.loading && cfg.reduceWorkDuringLoading;
+					const auto statusInterval = reducedLoad ? 10'000'000'000LL : 1'000'000'000LL;
+					if (cfg.statusFile && now - lastStatus >= statusInterval) {
 						lastStatus = now;
 						WriteStatus(now, m);
 					}
 
 					// (version 5) resource profiler (does its own timing)
-					Capture::ResourceTick(now);
-
-					// (version 5) manual capture requested with the hotkey
-					if (Hotkey::ConsumePressed()) {
-						static int s_manual = 0;
-						const int  index = ++s_manual;
-						spdlog::warn("Manual capture #{} requested with the hotkey", index);
-						Events::Write(std::format("MANUAL CAPTURE #{} requested with the hotkey", index));
-						Capture::Run("manual capture requested with the hotkey", index, g_csvPath, true);
+					if (reducedLoad) Capture::PauseResources(now);
+					else Capture::ResourceTick(now);
+					// The helper normally owns retention. Keep it available when that helper is disabled/unavailable.
+					if (!m.loading && !Independent::Active() &&
+						(!incompleteCleaned || (cfg.maxStorageMB && now - lastRetention >= 60'000'000'000LL))) {
+						Independent::Guard retention;
+						if (retention) {
+							if (!incompleteCleaned) { StoragePolicy::RemoveIncomplete(Util::WatchdogDir()); incompleteCleaned = true; }
+							const auto result = StoragePolicy::Enforce(Util::WatchdogDir(),
+								static_cast<std::uint64_t>(cfg.maxStorageMB) * 1024 * 1024, {g_csvPath});
+							lastRetention = now;
+							if (result.removed || result.errors) spdlog::info("Storage retention removed {} files; {} bytes remain; errors {}",
+								result.removed, result.after, result.errors);
+						}
 					}
+
+
 				} catch (const std::exception& e) {
 					spdlog::error("Stall check error: {}", e.what());
 				}
 
-				if (g_csv.is_open() && (now - lastStats) >= static_cast<std::int64_t>(cfg.statsIntervalSec) * 1'000'000'000) {
+				if (Monitor::Get().loading.load() && cfg.reduceWorkDuringLoading) {
+					if (!statsPaused) {
+						auto& state = Monitor::Get();
+						state.intervalFrames.exchange(0);
+						state.intervalFrameUsSum.exchange(0);
+						state.intervalFrameUsMax.exchange(0);
+						state.intervalHitches.exchange(0);
+						g_lastProc.valid = false;
+						statsPaused = true;
+					}
+					lastStats = now; // skip CPU/thread/VRAM stats during loads; don't catch up afterwards
+				} else if (g_csv.is_open() && (now - lastStats) >= static_cast<std::int64_t>(cfg.statsIntervalSec) * 1'000'000'000) {
+					statsPaused = false;
 					try {
 						WriteStatsRow(now, static_cast<double>(now - lastStats) / 1e9);
 					} catch (const std::exception& e) {

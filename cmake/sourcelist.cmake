@@ -6,5 +6,6 @@ set(sources ${sources}
     src/Capture.cpp
     src/AddressLib.cpp
     src/Events.cpp
+    src/Independent.cpp
     src/Hotkey.cpp
 )

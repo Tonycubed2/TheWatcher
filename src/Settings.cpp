@@ -131,6 +131,9 @@ void Settings::Load()
 
 	// Tuning keys are accepted from any of these sections; [Aggressive] is read last so it wins in mode 2
 	auto readTuning = [this](std::string_view a_sec) {
+		maxStorageMB = GetI(a_sec, "imaxstoragemb", maxStorageMB);
+		captureLoadingStalls = GetB(a_sec, "bcaptureloadingstalls", captureLoadingStalls);
+		reduceWorkDuringLoading = GetB(a_sec, "breduceworkduringloading", reduceWorkDuringLoading);
 		statsIntervalSec = GetI(a_sec, "istatsintervalseconds", statsIntervalSec);
 		hitchMs = GetF(a_sec, "fhitchms", hitchMs);
 		frameStallSec = GetF(a_sec, "fframestallseconds", frameStallSec);
@@ -138,10 +141,13 @@ void Settings::Load()
 		loadStallSec = GetF(a_sec, "floadstallseconds", loadStallSec);
 		recaptureSec = GetF(a_sec, "frecaptureseconds", recaptureSec);
 		maxCaptures = GetI(a_sec, "imaxcapturespersession", maxCaptures);
-		ignoreUnfocused = GetB(a_sec, "bignorewhenunfocused", ignoreUnfocused);
+		ignoreUnfocused = false; // no foreground suppression, including old INIs
+		independentWatchdog = GetB(a_sec, "bindependentwatchdog", independentWatchdog);
+		independentFrameSec = GetF(a_sec, "findependentframeseconds", independentFrameSec);
 		mainThreadStack = GetB(a_sec, "bmainthreadstack", mainThreadStack);
 		allThreadStacks = GetB(a_sec, "ballthreadstacks", allThreadStacks);
 		minidumpLevel = GetI(a_sec, "iminidumplevel", minidumpLevel);
+		allowFullMemoryDump = GetB(a_sec, "ballowfullmemorydump", allowFullMemoryDump);
 		outOfProcessDump = GetB(a_sec, "boutofprocessdump", outOfProcessDump);
 		backupLogs = GetB(a_sec, "bbackuplogs", backupLogs);
 		beep = GetB(a_sec, "bbeep", beep);
@@ -191,19 +197,26 @@ void Settings::Load()
 	readTuning("context");
 	readTuning("hotkey");
 	readTuning("resources");
+	readTuning("independent");
 	if (mode == 2) {
 		readTuning("aggressive");
 	}
 
 	// Sanity limits
+	maxStorageMB = std::clamp(maxStorageMB, 0, 1048576);
 	statsIntervalSec = std::max(statsIntervalSec, 5);
 	hitchMs = std::max(hitchMs, 1.0f);
 	frameStallSec = std::max(frameStallSec, 1.0f);
+	independentFrameSec = std::clamp(independentFrameSec, 1.0f, 120.0f);
 	loadWarnSec = std::max(loadWarnSec, 1.0f);
 	loadStallSec = std::max(loadStallSec, loadWarnSec);
 	recaptureSec = std::max(recaptureSec, 5.0f);
 	maxCaptures = std::clamp(maxCaptures, 0, 20);
 	minidumpLevel = std::clamp(minidumpLevel, 0, 3);
+	if (minidumpLevel == 3 && !allowFullMemoryDump) {
+		spdlog::warn("Old INI requests a full memory dump; downgraded to level 1. Full dumps require bAllowFullMemoryDump=1 explicitly.");
+		minidumpLevel = 1;
+	}
 	keepStatsFiles = std::max(keepStatsFiles, 1);
 	keepStallCaptures = std::max(keepStallCaptures, 1);
 	threadSamples = std::clamp(threadSamples, 1, 20);
@@ -225,6 +238,9 @@ void Settings::Load()
 void Settings::LogValues() const
 {
 	static constexpr const char* kModes[] = { "off", "normal", "aggressive" };
+	spdlog::info("Loading captures opt-in: {} | Reduced loading diagnostics: {} | Storage cap: {} MiB (0 = off)",
+		captureLoadingStalls, reduceWorkDuringLoading, maxStorageMB);
+	spdlog::info("Focus suppression removed; independent helper {}, emergency frame threshold {:.1f}s", independentWatchdog, independentFrameSec);
 	spdlog::info("Mode: {} ({})", mode, kModes[mode]);
 	spdlog::info("Stats log: {} every {}s, hitch threshold {:.0f} ms", StatsEnabled() ? "on" : "off", statsIntervalSec, hitchMs);
 	spdlog::info("Frame stall: {:.1f}s | Load warn: {:.1f}s | Load stall: {:.1f}s | Recapture every {:.0f}s, max {} per session",

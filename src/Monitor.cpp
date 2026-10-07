@@ -2,6 +2,7 @@
 #include "Monitor.h"
 #include "Events.h"
 #include "Settings.h"
+#include "Independent.h"
 
 namespace Monitor
 {
@@ -55,6 +56,7 @@ namespace Monitor
 
 		void OnLoadStart()
 		{
+			Independent::LoadStart();
 			const auto now = NowNs();
 			g_state.loadStartNs.store(now);
 			g_state.lastProgressNs.store(now);
@@ -87,6 +89,7 @@ namespace Monitor
 				return;
 			}
 			const auto   now = NowNs();
+			Independent::LoadEnd();
 			const double secs = static_cast<double>(now - g_state.loadStartNs.load()) / 1e9;
 			const auto   n = g_state.loadCount.fetch_add(1) + 1;
 			g_state.loadEndNs.store(now);
@@ -116,6 +119,7 @@ namespace Monitor
 				return;
 			}
 			const auto now = NowNs();
+			Independent::LoadProgress();
 			const auto prev = g_state.lastProgressNs.exchange(now);
 			if (prev > 0 && now > prev) {
 				UpdateMax(g_state.loadMaxGapUs, static_cast<std::uint64_t>((now - prev) / 1000));
@@ -257,6 +261,7 @@ namespace Monitor
 
 		void OnFrame()
 		{
+			Independent::Frame();
 			static bool threadRecorded = false;
 			if (!threadRecorded) {
 				threadRecorded = true;
@@ -398,6 +403,9 @@ namespace Monitor
 
 			RE::BSEventNotifyControl ProcessEvent(const RE::TESEquipEvent* a_event, RE::BSTEventSource<RE::TESEquipEvent>*) override
 			{
+				// Save loading generates many equip events. Keep load/menu breadcrumbs, skip noisy item logging.
+				if (g_state.loading.load(std::memory_order_relaxed) && Settings::Get().reduceWorkDuringLoading)
+					return RE::BSEventNotifyControl::kContinue;
 				if (!a_event || !a_event->actor) {
 					return RE::BSEventNotifyControl::kContinue;
 				}
@@ -450,8 +458,11 @@ namespace Monitor
 
 	Context GetContext()
 	{
-		std::scoped_lock lock(g_nameLock);
-		return g_ctx;
+		// Diagnostic readers must not wait for a lock held by a frozen game thread.
+        thread_local Context cached;
+        std::unique_lock lock(g_nameLock, std::try_to_lock);
+        if (lock.owns_lock()) cached = g_ctx;
+        return cached;
 	}
 
 	namespace

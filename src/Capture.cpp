@@ -1,4 +1,5 @@
 #include "PCH.h"
+#include "Independent.h"
 #include "Capture.h"
 #include "AddressLib.h"
 #include "Events.h"
@@ -889,6 +890,7 @@ namespace Capture
 		ProfWindow                            g_winLast;
 		ProfWindow                            g_winSession;
 		std::filesystem::path                 g_resPath;
+		bool                                  g_profPaused = false;
 
 		std::uint64_t ToTicks(const FILETIME& a_ft)
 		{
@@ -960,7 +962,7 @@ namespace Capture
 
 			// Generic start (std::thread, _beginthreadex, thread pool): look at the stack once
 			ThreadStack ts;
-			if (CaptureThread(a_tid, ts, false)) {
+			if (Settings::Get().resourceSampleThreads > 0 && CaptureThread(a_tid, ts, false)) {
 				for (std::size_t i = ts.count; i-- > 0;) {
 					const auto m = FindModule(g_profMods, ts.frames[i]);
 					if (m && !IsPlumbing(m->name) && !IsSystemModule(m->name)) {
@@ -1050,11 +1052,33 @@ namespace Capture
 		}
 	}
 
+	void PauseResources(std::int64_t a_nowNs)
+	{
+		// Watchdog-thread only. No thread enumeration or game-thread suspension during loading.
+		if (g_profPaused) return;
+		g_profPaused = true;
+		if (g_windowStartNs) {
+			g_winCur.seconds = static_cast<double>(a_nowNs - g_windowStartNs) / 1e9;
+			Add(g_winSession, g_winCur);
+			g_winLast = std::move(g_winCur);
+			g_winCur = {};
+		}
+		g_windowStartNs = g_profLastNs = 0;
+	}
+
 	void ResourceTick(std::int64_t a_nowNs)
 	{
+		Independent::Guard guard;
+		if (!guard) return;
 		const auto& cfg = Settings::Get();
 		if (!cfg.resourceProfiler) {
 			return;
+		}
+		if (g_profPaused) {
+			// Rebaseline on resume; loading CPU time must not be credited to gameplay.
+			for (auto& [tid, t] : g_prof) { if (t.handle) CloseHandle(t.handle); }
+			g_prof.clear();
+			g_profPaused = false;
 		}
 		const std::int64_t interval = static_cast<std::int64_t>(cfg.resourceIntervalMs) * 1'000'000;
 		if (g_profLastNs != 0 && a_nowNs - g_profLastNs < interval) {
@@ -1180,6 +1204,7 @@ namespace Capture
 		if (!cfg.resourceProfiler) {
 			return {};
 		}
+		if (g_profPaused) return "[RESOURCES] profiler paused during loading; no loading CPU samples collected.\n\n";
 		// Recent = the last full window plus whatever has been collected since
 		ProfWindow recent = g_winLast;
 		ProfWindow cur = g_winCur;
@@ -1433,6 +1458,8 @@ namespace Capture
 
 	bool HistorySample(std::uint32_t a_mainTid)
 	{
+		Independent::Guard guard;
+		if (!guard) return false;
 		if (a_mainTid == 0) {
 			return false;
 		}
@@ -1477,8 +1504,12 @@ namespace Capture
 		return sum.signature;
 	}
 
-	bool Run(const std::string& a_reason, int a_index, const std::filesystem::path& a_statsFile, bool a_manual)
+	bool Run(const std::string& a_reason, int a_index, const std::filesystem::path& a_statsFile, bool a_manual, bool a_externalEvidence, bool* a_started)
 	{
+		if (a_started) *a_started = false;
+		Independent::Guard guard(true);
+		if (!guard) return false; // never wait on another capture
+		if (a_started) *a_started = true;
 		const auto& cfg = Settings::Get();
 		auto&       s = Monitor::Get();
 
@@ -1488,6 +1519,7 @@ namespace Capture
 		std::error_code ec;
 		std::filesystem::create_directories(folder, ec);
 
+		Util::WriteFileAtomic(folder / "capture_started.txt", std::format("Version 10 capture requested: {}\n", a_reason));
 		g_captureIndex.store(a_index);
 		g_captureStartNs.store(Monitor::NowNs());
 		SetStep("thread stacks");
@@ -1498,7 +1530,7 @@ namespace Capture
 		const DWORD mainTid = s.mainThreadId.load();
 		ThreadStack mainStack;
 		bool        mainOk = false;
-		if ((cfg.mainThreadStack || cfg.allThreadStacks) && mainTid != 0) {
+		if (!a_externalEvidence && (cfg.mainThreadStack || cfg.allThreadStacks) && mainTid != 0) {
 			g_scanLen = 0;
 			mainOk = CaptureThread(mainTid, mainStack, true);
 		}
@@ -1514,7 +1546,7 @@ namespace Capture
 		const bool light = recovered && cfg.skipDumpIfRecovered;
 
 		std::vector<ThreadStack> others;
-		if (cfg.allThreadStacks && !light) {
+		if (!a_externalEvidence && cfg.allThreadStacks && !light) {
 			for (const auto tid : ThreadIds()) {
 				if (tid == self || tid == mainTid) {
 					continue;
@@ -1532,8 +1564,9 @@ namespace Capture
 		const auto hist = SummarizeHistory(mods, 3);
 
 		std::string report;
-		report += std::format("The Watcher version 6 {} #{}  {}\n", a_manual ? "manual capture" : "stall capture", a_index, Util::Stamp(false));
+		report += std::format("The Watcher version 10 {} #{}  {}\n", a_manual ? "manual capture" : "stall capture", a_index, Util::Stamp(false));
 		report += std::format("Reason: {}\n", a_reason);
+		if (a_externalEvidence) report += "Independent evidence is in the independent_manual_ or independent_emergency_ folder; this report does not write a duplicate dump.\n";
 		report += std::format("Frame heartbeat age at stack capture: {:.0f} ms | Loading screen: {}\n", hbMs, loading ? "open" : "closed");
 		if (recovered) {
 			report += "RECOVERED: the game was running again when the stack was taken. The [MAIN THREAD] stack below is ordinary\n"
@@ -1555,7 +1588,7 @@ namespace Capture
 			report += "[MAIN THREAD HISTORY] none (sampling off, or the stall began before sampling could start)\n\n";
 		}
 
-		if (cfg.mainThreadStack || cfg.allThreadStacks) {
+		if (!a_externalEvidence && (cfg.mainThreadStack || cfg.allThreadStacks)) {
 			if (mainOk) {
 				AppendStack(report, recovered ? "MAIN THREAD (after recovery)" : "MAIN THREAD", mainStack, mods);
 				AppendScan(report, mods);
@@ -1576,7 +1609,7 @@ namespace Capture
 		}
 
 		// (version 6) who is waiting for whom
-		if (cfg.waitChains) {
+		if (!a_externalEvidence && cfg.waitChains) {
 			SetStep("wait chains");
 			if (AppendWaitChains(report, mainTid, mods, mainOk ? &mainStack : nullptr, others)) {
 				report.insert(0, "DEADLOCK DETECTED: see [WAIT CHAINS] below.\n");
@@ -1587,7 +1620,7 @@ namespace Capture
 		const auto mainSig = mainOk ? Signature(mainStack, mods) : std::string();
 		auto writeSummary = [&](const SamplingResult& a_sampling) {
 			const auto json = std::format(
-				"{{\n  \"watcher_version\":\"6\",\n  \"index\":{},\n  \"time\":{},\n  \"reason\":{},\n  \"recovered\":{},\n  \"heartbeat_age_ms\":{:.0f},\n"
+				"{{\n  \"watcher_version\":\"10\",\n  \"index\":{},\n  \"time\":{},\n  \"reason\":{},\n  \"recovered\":{},\n  \"heartbeat_age_ms\":{:.0f},\n"
 				"  \"loading\":{},\n  \"signature\":{},\n  \"main_stack_signature\":{},\n  \"context\":{},\n  \"history\":{},\n  \"main_stack\":{},\n"
 				"  \"sampling\":{{\"same\":{},\"changed\":{},\"incomplete\":{},\"main\":{}}},\n  \"thread_groups\":{}\n}}\n",
 				a_index, Util::Json(Util::Stamp(false)), Util::Json(a_reason), recovered ? "true" : "false", hbMs, loading ? "true" : "false",
@@ -1620,7 +1653,7 @@ namespace Capture
 			spdlog::critical("Backed up {} log files to {}", n, (folder / "logs").string());
 		}
 
-		if (!light) {
+		if (!light && !a_externalEvidence) {
 			// 5) Tell the user
 			SetStep("alert");
 			Alert();
@@ -1637,7 +1670,7 @@ namespace Capture
 			}
 
 			// 7) Minidump last: slowest step. Written by the helper process when available.
-			if (cfg.minidumpLevel > 0 && (!a_manual || cfg.hotkeyMinidump)) {
+			if (!a_externalEvidence && cfg.minidumpLevel > 0 && (!a_manual || cfg.hotkeyMinidump)) {
 				if (cfg.minidumpLevel >= 3) {
 					spdlog::critical("Writing FULL memory dump; this can take minutes and 10-20+ GB of disk");
 				}
@@ -1647,13 +1680,13 @@ namespace Capture
 				if (cfg.outOfProcessDump) {
 					result = WriteDumpExternal(dumpPath, cfg.minidumpLevel);
 					if (result == -1) {
-						spdlog::warn("TheWatcherDump.exe not found next to TheWatcher.dll; writing the dump from inside the game instead");
+						spdlog::error("Dump helper unavailable: skipping dump; never fall back to writing inside a frozen game");
 					}
 				}
 				const char* how = "by helper process";
 				if (result == -1) {
-					result = WriteDump(dumpPath, cfg.minidumpLevel) ? 1 : 0;
-					how = "from inside the game";
+					result = 0;
+					how = "SKIPPED: external helper unavailable or external dumps disabled";
 				}
 				spdlog::critical("Minidump (level {}) {} {}: {}", cfg.minidumpLevel, result == 1 ? "written" : "FAILED", how, dumpPath.string());
 			}

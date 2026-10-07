@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 # DLL name: TheWatcher.dll
-project(TheWatcher VERSION 6.0.0 LANGUAGES CXX)
+project(TheWatcher VERSION 10.0.0 LANGUAGES CXX)
 
 # Build output stays in the build folder only (build\release-msvc or build\debug-msvc).
 # Nothing is copied anywhere else; copy TheWatcher.dll, TheWatcher.pdb and TheWatcher.ini yourself.
@@ -29,4 +29,4 @@ target_link_libraries(${PROJECT_NAME} PRIVATE dbghelp psapi dxgi shell32 ole32 a
 # Helper program that writes the minidump from outside the frozen game. Ship it next to TheWatcher.dll.
 add_executable(TheWatcherDump src/DumpHelper.cpp)
 target_compile_features(TheWatcherDump PRIVATE cxx_std_20)
-target_link_libraries(TheWatcherDump PRIVATE dbghelp)
+target_link_libraries(TheWatcherDump PRIVATE dbghelp user32)

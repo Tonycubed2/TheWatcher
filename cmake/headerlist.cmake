@@ -7,5 +7,10 @@ set(headers ${headers}
     src/Capture.h
     src/AddressLib.h
     src/Events.h
+    src/Independent.h
+    src/IndependentShared.h
+    src/DumpValidation.h
+    src/StoragePolicy.h
+    src/IndependentDecision.h
     src/Hotkey.h
 )

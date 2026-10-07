@@ -1,6 +1,7 @@
 #include "PCH.h"
 #include "Hotkey.h"
 #include "Settings.h"
+#include "Util.h"
 
 namespace Hotkey
 {
@@ -118,16 +119,7 @@ namespace Hotkey
 			return true;
 		}
 
-		bool GameInFront()
-		{
-			const HWND fg = GetForegroundWindow();
-			if (!fg) {
-				return false;
-			}
-			DWORD pid = 0;
-			GetWindowThreadProcessId(fg, &pid);
-			return pid == GetCurrentProcessId();
-		}
+		bool GameInFront() { return Util::GameWindowInFront(); }
 
 		bool KeyDown(int a_vk) { return (GetAsyncKeyState(a_vk) & 0x8000) != 0; }
 
@@ -167,6 +159,12 @@ namespace Hotkey
 		}
 	}
 
+	void GetBinding(DWORD& key, DWORD& modifiers)
+	{
+		key = g_combo.vk;
+		modifiers = (g_combo.shift ? 1u : 0u) | (g_combo.ctrl ? 2u : 0u) | (g_combo.alt ? 4u : 0u);
+	}
+
 	// Called from the watchdog thread every 50 ms. The key is read with GetAsyncKeyState, the same way many SKSE
 	// plugins read keys; version 5's first build used a low-level keyboard hook, which never saw keys in game.
 	bool ConsumePressed()
@@ -192,10 +190,10 @@ namespace Hotkey
 		if (g_firedThisHold || now - g_downSinceMs < g_holdMs) {
 			return false;
 		}
-		g_firedThisHold = true;  // once per press / hold
-		if (!ModifiersOk() || !GameInFront() || !Fire(now)) {
+		if (!ModifiersOk() || !Fire(now)) {
 			return false;
 		}
+		g_firedThisHold = true;  // once per valid press / hold; focus never suppresses it
 		if (g_holdMs > 0) {
 			spdlog::info("Hotkey held for {:.1f}s: starting manual capture", static_cast<double>(g_holdMs) / 1000.0);
 		}

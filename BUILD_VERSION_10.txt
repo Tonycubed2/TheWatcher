@@ -1,0 +1,24 @@
+VERSION 10 BUILD COMMANDS
+
+Extract into C:\dllmaker\TheWatcher, replacing the old source files.
+Open x64 Native Tools Command Prompt for VS 2022 and paste one line at a time:
+
+cd /d C:\dllmaker\TheWatcher
+cmake --preset build-release-msvc
+cmake --build --preset release-msvc --parallel 1
+
+Install together in your MO2 mod's SKSE\Plugins folder:
+- build\release-msvc\TheWatcher.dll
+- build\release-msvc\TheWatcher.pdb
+- build\release-msvc\TheWatcherDump.exe
+- TheWatcher.ini from this source ZIP
+
+Both binaries must be version 10; its shared protocol differs from version 9.
+The EXE starts automatically. Do not run it manually.
+
+Defaults: 8-second gameplay detection, loading capture OFF, dumps OFF,
+reduced diagnostics during loading, 1024 MiB soft retention cap.
+The cap deletes old dumps first from the TheWatcher subfolder only.
+
+This package contains source. Portable regression checks passed, but Windows compilation
+and in-game execution have not been performed here.

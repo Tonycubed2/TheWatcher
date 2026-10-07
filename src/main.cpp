@@ -3,6 +3,7 @@
 #include "Capture.h"
 #include "Events.h"
 #include "Hotkey.h"
+#include "Independent.h"
 #include "Monitor.h"
 #include "Settings.h"
 #include "Util.h"
@@ -44,10 +45,11 @@ namespace
 		if (a_msg->type == SKSE::MessagingInterface::kDataLoaded) {
 			if (Settings::Get().eventsLog) {
 				Events::Open();
-				Events::Write(std::format("SESSION START  The Watcher version 6, game {}, pid {}", REL::Module::get().version().string(), GetCurrentProcessId()));
+				Events::Write(std::format("SESSION START  The Watcher version 10, game {}, pid {}", REL::Module::get().version().string(), GetCurrentProcessId()));
 			}
 			Monitor::RegisterEventSinks();
 			Hotkey::Start();
+			Independent::Start();
 			Watchdog::Start();
 		} else {
 			Monitor::NoteGameMessage(a_msg->type);  // (1.1) save load / new game / save: tags loading screens + events log
@@ -62,7 +64,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 
 	const auto ver = REL::Module::get().version();
 	const char* runtime = ver.minor() >= 6 ? "AE (1.6.x)" : (ver.minor() == 5 ? "SE (1.5.x)" : (ver.minor() == 4 ? "VR (1.4.x)" : "unknown"));
-	spdlog::info("The Watcher version 6, game {} - runtime {}", ver.string(), runtime);
+	spdlog::info("The Watcher version 10, game {} - runtime {}", ver.string(), runtime);
 
 	// Plugins load on the game's main thread; the frame hook confirms this on its first call anyway
 	Monitor::Get().mainThreadId.store(GetCurrentThreadId());

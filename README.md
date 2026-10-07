@@ -1,44 +1,77 @@
-# The Watcher
+# The Watcher — version 10
 
-SKSE plugin for Skyrim AE (1.6.1170) that watches for the game freezing, especially on loading screens,
-captures the frozen thread's call stack when it happens, and in aggressive mode logs performance stats every interval.
+Reduces capture interference during legitimate loading and improves helper lifetime,
+dump integrity and storage retention. Gameplay freeze detection remains 8 seconds.
 
-Version 1.1.2: stack history sampled DURING hitches, stalls and slow loading gaps; recovered captures labeled and kept
-light; stacks walked from a copy after the thread is resumed; location / actor / Papyrus / VRAM context; events log,
-live status file and machine-readable summaries. See CHANGELOG.md.
-Version 1.0.4: dumps written by a separate helper (TheWatcherDump.exe, ship it next to the DLL), report saved before slower steps, a guard that logs if a capture itself gets stuck, SAME/CHANGED/INCOMPLETE sampling labels, sampling limited to the main thread unless bAllThreadStacks=1, log backup covers the whole game session, safer default thresholds (normal mode is the default).
-Version 1.0.3 added Skyrim SE 1.5.97 support (SE Address Library file, SE hook addresses, runtime line in the log). SE is untested so far.
-Version 1.0.2 added Address Library IDs on SkyrimSE.exe frames and FROZEN/MOVING thread sampling in each capture.
+## Defaults and loading
 
-## Build
-Same as your EscapeRestore template: open `C:\dllmaker\thewatcher` in VS2022, pick the Release preset, build.
+- `bCaptureLoadingStalls=0`: loading screens never automatically trigger captures by default.
+  F12 remains available during loading. Load/menu/progress breadcrumbs are retained.
+- `fLoadWarnSeconds=60`: a quiet load is logged as a slow load, not proof of a freeze.
+  Zero gameplay frames during a loading screen is expected.
+- `fLoadStallSeconds=300`: the no-event threshold used ONLY when loading capture is
+  explicitly enabled. Game load events can be silent during legitimate phases.
+- `bReduceWorkDuringLoading=1`: CPU/thread profiling, CSV stats, equip-event logging
+  and optional slow-stack sampling pause while loading. Status writes slow to every
+  10 seconds and omit detailed context/Papyrus reads. CPU baselines reset on resume;
+  loading CPU is not attributed to gameplay. Actor context updates already skip loading.
+- All-actor equip logging is now off by default; player equip events resume after loading.
+- Dumps remain off in Capture, Aggressive and compiled defaults. F12 remains instant
+  and window focus never suppresses capture. Snapshots still briefly suspend individual
+  target threads to copy context/raw stack data; raw values are not unwound call stacks.
 
-## Install (MO2)
-```
-SKSE\Plugins\TheWatcher.dll
-SKSE\Plugins\TheWatcher.pdb
-SKSE\Plugins\TheWatcher.ini
-```
+## Helper lifetime and optional dumps
 
-## Output
-`Documents\My Games\Skyrim Special Edition\SKSE\`
-- `TheWatcher.log`: settings, one line per loading screen, warnings, captures
-- `TheWatcher\stats_<date_time>.csv`: stats, one file per session (aggressive mode or `bStatsLog=1`)
-- `TheWatcher\stall_<date_time>_<n>\`: `stacks.txt`, `summary.json` (1.1), `SkyrimSE.dmp`, `logs\` (every SKSE log from that session)
-- `TheWatcher\slow_<date_time>.jsonl` (1.1): one JSON line per hitch / slow loading gap, with the sampled stack history
-- `TheWatcher\events_<date_time>.log` (1.1): loads, menus, cell changes, saves, fast travel, equips, hitches, captures
-- `TheWatcher\status.json` (1.1): current state, rewritten every second
+The persistent monitor stays alive during the game session to monitor heartbeats/F12.
+Capture workers return immediately after their work completes. Each helper has an
+independent wait on the original Skyrim process handle and stops when Skyrim exits,
+even if filesystem or capture work is stuck. Shared captures also check the target's
+creation time to avoid acting on a reused PID. No other Skyrim/MO2 session or unrelated
+helper is searched for or terminated. Restart Skyrim after installing the new binaries.
 
-## Modes (TheWatcher.ini)
-- `iMode=0` off
-- `iMode=1` normal: detect stalls, capture evidence, one log line per loading screen
-- `iMode=2` aggressive: tighter thresholds, all-thread stacks, stats row every `iStatsIntervalSeconds`.
-  Keys in `[Aggressive]` replace the normal values.
+Optional dumps write to `.dmp.partial` first. Only a successful, flushed dump that passes
+structural validation is renamed to `.dmp`. Checks cover the header, stream directory,
+required thread/module/system streams, thread stack/context locations and memory payload
+bounds. Failed validation removes the partial file and records the reason. Interrupted
+partials are cleaned on the next session outside loading/capture. Structural validation
+cannot guarantee successful stack unwinding in every debugger.
 
-## Known limits
-- Default thresholds are starting points; tune them from the per-load lines in `TheWatcher.log`.
-- Confirmed on 1.6.1170: the main loop does NOT tick during loading screens ("0 frames during load" on every load).
-  Load-progress events do fire during normal door / save loads.
-- 1.1: a thread is suspended only for GetThreadContext + one copy of its stack; the unwind runs on the copy after
-  the thread is resumed, so the watcher can no longer deadlock on a lock the suspended thread holds. The minidump
-  (MiniDumpWriteDump) is still written last because it suspends every thread itself.
+Snapshot-based PSS dumps are not implemented in this release. Enabling optional live
+process dumps can still pause Skyrim while Windows writes them. Dumps remain disabled
+by default; full memory still requires both level 3 and `bAllowFullMemoryDump=1`.
+
+## Storage
+
+`iMaxStorageMB=1024` in General sets a 1024 MiB (1 GiB) soft cap for the TheWatcher
+subfolder. `0` disables the byte cap. Existing capture-count limits still apply.
+Outside loading/captures, retention checks run every 60 seconds under the diagnostic
+ownership gate. Oldest dumps are removed before old text evidence; symlinked files/folders
+are skipped. Current monitor/CSV paths and recent non-dump files are protected, so the cap
+can be exceeded by active files or during a write. A dump larger than the cap can be
+removed on a subsequent cleanup. SKSE logs outside TheWatcher are not subject to this cap.
+
+## Build and install
+
+Extract into C:\dllmaker\TheWatcher, replacing source files. In the x64 Native Tools
+Command Prompt for VS 2022:
+
+    cd /d C:\dllmaker\TheWatcher
+    cmake --preset build-release-msvc
+    cmake --build --preset release-msvc --parallel 1
+
+Install `build/release-msvc/TheWatcher.dll`, its matching `TheWatcher.pdb`,
+`build/release-msvc/TheWatcherDump.exe`, and the included `TheWatcher.ini` together
+in SKSE/Plugins. Both DLL and EXE must be version 10. The helper launches automatically.
+Use the new INI to apply the updated defaults; old INI overrides may retain heavier settings.
+
+## Validation and limits
+
+Portable C++ regression checks cover eight-second gameplay detection, a six-minute load
+without automatic captures, explicit loading opt-in, loading/gameplay transitions,
+59-second capture overlap suppression and recovery/rearming. Separate tests cover zeroed
+and truncated dump metadata/payloads, retention ordering, protected files, disabled caps,
+partial cleanup and symlink exclusion. INI and source/build protocol checks are included.
+
+Windows/MSVC compilation and in-game timing were not available here. This package is
+source, not compiled binaries. The changes remove identified sources of interference;
+they do not prove zero overhead or fix every underlying Skyrim freeze.

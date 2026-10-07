@@ -126,4 +126,39 @@ namespace Util
 		}
 		return MoveFileExW(tmp.c_str(), a_path.c_str(), MOVEFILE_REPLACE_EXISTING) != FALSE;
 	}
+
+	// (version 7) Is the game the window in front?
+	// When a window stops responding and the user presses a key or clicks on it, Windows replaces it on screen with
+	// a "ghost" window (title "... (Not Responding)") that belongs to Windows, not to the game. Versions up to 6 saw
+	// that as "the game is not in front", so the hotkey was ignored and freeze detection paused exactly during a
+	// freeze the user was trying to capture. The ghost of our own window now counts as the game.
+	inline bool GameWindowInFront()
+	{
+		const HWND fg = GetForegroundWindow();
+		if (!fg) {
+			return false;
+		}
+		DWORD pid = 0;
+		GetWindowThreadProcessId(fg, &pid);
+		if (pid == GetCurrentProcessId()) {
+			return true;
+		}
+		// Windows' own lookup from a ghost window to the frozen window it stands in for
+		using HungWindowFromGhostWindow_t = HWND(WINAPI*)(HWND);
+		static const auto s_hungFromGhost = reinterpret_cast<HungWindowFromGhostWindow_t>(
+			GetProcAddress(GetModuleHandleW(L"user32.dll"), "HungWindowFromGhostWindow"));
+		if (s_hungFromGhost) {
+			if (const HWND real = s_hungFromGhost(fg)) {
+				DWORD realPid = 0;
+				GetWindowThreadProcessId(real, &realPid);
+				return realPid == GetCurrentProcessId();
+			}
+		}
+		// Fallback: a ghost window by class name (Windows only creates one for a window that stopped responding)
+		wchar_t cls[16]{};
+		if (GetClassNameW(fg, cls, 16) > 0 && wcscmp(cls, L"Ghost") == 0) {
+			return true;
+		}
+		return false;
+	}
 }
