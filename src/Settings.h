@@ -19,9 +19,13 @@ struct Settings
 	bool  reduceWorkDuringLoading = true;
 	float recaptureSec = 30.0f;
 	int   maxCaptures = 20;
-	bool  ignoreUnfocused = false; // legacy key is ignored in version 10
+	bool  ignoreUnfocused = false; // legacy key is ignored in version 13
 	bool  independentWatchdog = true;
 	float independentFrameSec = 8.0f;
+	// (12) Shader compiles (Effects 11, ENB, Community Shaders...) block the main thread on purpose: not a freeze
+	bool                     ignoreShaderCompiles = true;
+	float                    shaderCompileMaxSec = 120.0f;  // still compiling after this long = treated as a freeze
+	std::vector<std::string> shaderCompileModules{ "d3dcompiler" };  // lower-case parts of module file names
 
 	// [Capture]
 	bool mainThreadStack = true;
@@ -57,6 +61,7 @@ struct Settings
 	bool equipEvents = true;
 	bool equipAllActors = false;
 	int  keepEventFiles = 20;
+	int  recentLoadEvents = 40;  // (12) load breadcrumbs: last N load events in loading warnings and captures (0 = off, max 64)
 
 	// [Hotkey]  (version 5) save logs and a report on demand
 	bool        hotkeyEnabled = true;

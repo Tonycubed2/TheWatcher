@@ -1,0 +1,51 @@
+THE WATCHER VERSION 13 - SKYRIM 1.7.x SUPPORT BUILD
+
+Based on the version 12 beta source (C:\dllmaker\TheWatcher-12beta).
+Extract into a NEW folder: C:\dllmaker\TheWatcher-12-1704
+Do not extract over TheWatcher-12beta, TheWatcher or TheWatcher-git.
+
+What changed (source):
+  CMakeLists.txt             builds against C:\dllmaker\CommonLibSSE-NG (6.7.0) instead of the vcpkg fork
+  vcpkg.json                 the dependencies CommonLibSSE-NG 6.7.0 needs (same list as Precision Animal Excluder)
+  vcpkg-configuration.json   same vcpkg baseline as Precision Animal Excluder
+  src/AddressLib.cpp/.h      reads Address Library format 5 (1.7.x); safe ID lookup
+  src/Monitor.cpp            frame hook verifies its call site before patching
+  src/main.cpp               runtime label for 1.7.x; Address Library always loaded
+  src/Monitor.cpp/.h         load breadcrumbs (recent load events, most repeated forms per loading screen)
+  src/Watchdog.cpp           breadcrumbs in SLOW LOAD warnings; new LONG LOAD warning for looping loads
+  src/Capture.cpp            breadcrumbs in capture reports and summary.json
+  src/Settings.cpp/.h        iRecentLoadEvents
+  TheWatcher.ini             iRecentLoadEvents=40 under [Context]
+  CHANGELOG.md               new entries
+
+Skyrim VR support needs the OpenVR SDK files inside CommonLibSSE-NG (already copied there):
+  C:\dllmaker\CommonLibSSE-NG\extern\openvr\headers\openvr.h (and the other headers)
+  C:\dllmaker\CommonLibSSE-NG\extern\openvr\lib\win64\openvr_api.lib
+  (OpenVR SDK 2.15.6 from github.com/ValveSoftware/openvr). Configure stops with a message if they are missing.
+
+Checked against the real files:
+  SkyrimSE.exe 1.7.104.0 + versionlib-1-7-104-0.bin:
+  36544+0x160 is a CALL to 36564 (Main::Update), same as 1.6.1170.
+  Every Address Library ID CommonLibSSE-NG uses for The Watcher's game reads exists in 1.7.104.
+
+Build in x64 Native Tools Command Prompt for VS 2022, one line at a time.
+The first build also compiles CommonLibSSE-NG and takes roughly 15 minutes.
+
+cd /d C:\dllmaker\TheWatcher-12-1704
+cmake --preset build-release-msvc
+cmake --build --preset release-msvc --parallel 1
+
+Install together in your MO2 mod's SKSE\Plugins folder:
+- build\release-msvc\TheWatcher.dll
+- build\release-msvc\TheWatcher.pdb
+- build\release-msvc\TheWatcherDump.exe
+- TheWatcher.ini
+
+Check TheWatcher.log after starting the game. On 1.7.104 you should see:
+  The Watcher version 13, game 1.7.104.0 - runtime AE (1.7.x) (built with CommonLibSSE-NG 6.7.0)
+  Address Library loaded: ... IDs from Data/SKSE/Plugins/versionlib-1-7-104-0.bin (format 5)
+  Frame hook installed at SkyrimSE.exe+... (ID 36544+0x160, AE 1.7.104.0): call into Main::Update confirmed
+(or "chained behind hdtsmp64.dll" if HDT-SMP hooks the same spot first). Test 1.6.1170 the same way.
+
+Not compiled here: no Windows SDK in this environment. Address Library parsing was tested
+against the real 1.7.104 file; the rest needs your MSVC build and an in-game run.

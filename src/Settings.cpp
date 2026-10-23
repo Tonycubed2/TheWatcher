@@ -144,6 +144,33 @@ void Settings::Load()
 		ignoreUnfocused = false; // no foreground suppression, including old INIs
 		independentWatchdog = GetB(a_sec, "bindependentwatchdog", independentWatchdog);
 		independentFrameSec = GetF(a_sec, "findependentframeseconds", independentFrameSec);
+		ignoreShaderCompiles = GetB(a_sec, "bignoreshadercompiles", ignoreShaderCompiles);
+		shaderCompileMaxSec = GetF(a_sec, "fshadercompilemaxseconds", shaderCompileMaxSec);
+		{
+			const auto list = GetS(a_sec, "sshadercompilemodules", std::string());
+			if (!list.empty()) {
+				shaderCompileModules.clear();
+				std::string item;
+				auto flush = [&]() {
+					const auto b = item.find_first_not_of(" \t");
+					const auto e = item.find_last_not_of(" \t");
+					if (b != std::string::npos) {
+						std::string v = item.substr(b, e - b + 1);
+						std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+						shaderCompileModules.push_back(std::move(v));
+					}
+					item.clear();
+				};
+				for (const char c : list) {
+					if (c == ',' || c == ';') {
+						flush();
+					} else {
+						item += c;
+					}
+				}
+				flush();
+			}
+		}
 		mainThreadStack = GetB(a_sec, "bmainthreadstack", mainThreadStack);
 		allThreadStacks = GetB(a_sec, "ballthreadstacks", allThreadStacks);
 		minidumpLevel = GetI(a_sec, "iminidumplevel", minidumpLevel);
@@ -173,6 +200,7 @@ void Settings::Load()
 		eventsLog = GetB(a_sec, "beventslog", eventsLog);
 		equipEvents = GetB(a_sec, "bequipevents", equipEvents);
 		equipAllActors = GetB(a_sec, "bequipallactors", equipAllActors);
+		recentLoadEvents = GetI(a_sec, "irecentloadevents", recentLoadEvents);
 		keepEventFiles = GetI(a_sec, "ikeepeventfiles", keepEventFiles);
 
 		waitChains = GetB(a_sec, "bwaitchains", waitChains);
@@ -208,6 +236,7 @@ void Settings::Load()
 	hitchMs = std::max(hitchMs, 1.0f);
 	frameStallSec = std::max(frameStallSec, 1.0f);
 	independentFrameSec = std::clamp(independentFrameSec, 1.0f, 120.0f);
+	shaderCompileMaxSec = std::clamp(shaderCompileMaxSec, 5.0f, 3600.0f);
 	loadWarnSec = std::max(loadWarnSec, 1.0f);
 	loadStallSec = std::max(loadStallSec, loadWarnSec);
 	recaptureSec = std::max(recaptureSec, 5.0f);
@@ -227,6 +256,7 @@ void Settings::Load()
 	slowSampleIntervalMs = std::clamp(slowSampleIntervalMs, 20, 1000);
 	maxSlowReports = std::clamp(maxSlowReports, 0, 1000);
 	keepEventFiles = std::max(keepEventFiles, 1);
+	recentLoadEvents = std::clamp(recentLoadEvents, 0, 64);
 	keepManualCaptures = std::max(keepManualCaptures, 1);
 	hotkeyHoldSec = std::clamp(hotkeyHoldSec, 0.0f, 30.0f);
 	resourceIntervalMs = std::clamp(resourceIntervalMs, 100, 5000);
@@ -254,6 +284,15 @@ void Settings::LogValues() const
 		slowSampling, hitchSampleSec, hitchReportSec, loadGapSampleSec, slowSampleIntervalMs, maxSlowReports);
 	spdlog::info("Context: actor breakdown {}, papyrus {}, vram {}, status file {}, events log {} (equip {}, all actors {})",
 		actorBreakdown, papyrusStats, vramStats, statusFile, eventsLog, equipEvents, equipAllActors);
+	{
+		std::string mods;
+		for (const auto& m : shaderCompileModules) {
+			mods += (mods.empty() ? "" : ",") + m;
+		}
+		spdlog::info("Shader compiles: ignored {} (modules '{}', up to {:.0f}s before a compile counts as a freeze)", ignoreShaderCompiles,
+			mods, shaderCompileMaxSec);
+	}
+	spdlog::info("Load breadcrumbs: last {} load events in loading warnings and captures (0 = off)", recentLoadEvents);
 	spdlog::info("Hotkey: {} ({}, hold {:.1f}s), minidump on manual capture {}, keep {} manual captures", hotkeyEnabled ? "on" : "off",
 		hotkey, hotkeyHoldSec, hotkeyMinidump, keepManualCaptures);
 	spdlog::info("Resource profiler {}: every {} ms, {}s window, top {}, sample up to {} busy game threads, resources log {}",

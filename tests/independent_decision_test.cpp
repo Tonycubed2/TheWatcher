@@ -32,5 +32,28 @@ int main() {
     assert(!mods.Poll(true, false, 100, 0));
     assert(mods.Poll(true, true, 120, 0));
     assert(!mods.Poll(true, true, 140, 0));
+    // A key press survives a busy gate and key release, coalesces repeated
+    // requests, and is consumed exactly once when capture can start.
+    ManualRequest request;
+    assert(request.Queue(100));
+    assert(!request.Queue(500));
+    assert(request.since == 100);
+    assert(!request.Expire(180099));
+    assert(request.pending);
+    request.Started();
+    assert(!request.pending);
+    assert(!request.Expire(200000));
+    // A stuck operation expires the pending request without a delayed capture.
+    assert(request.Queue(200000));
+    assert(!request.Queue(379999));
+    assert(request.Expire(380000));
+    assert(!request.pending);
+    assert(!request.Expire(380020));
+    assert(request.Queue(380040));
+    request.Started();
+    assert(!request.pending);
+    // Holding F12 does not create a second request after consuming the first.
+    assert(hold.Poll(true, true, 7000, 3000));
+    assert(!hold.Poll(true, true, 7020, 3000));
     std::cout << "Independent detection and hotkey tests passed\n";
 }

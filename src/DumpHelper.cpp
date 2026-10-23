@@ -1,10 +1,12 @@
-// Version 8: one-shot dump writer AND persistent independent watchdog.
+// Version 13: one-shot dump writer AND persistent independent watchdog.
 // --watch <pid> <mapping> <directory>; --capture <pid> <folder> <level> <mapping>
+// --waitchains <pid> <folder> <mapping>: isolated, non-suspending WCT child.
 // Legacy syntax remains: <pid> <output.dmp> <level 1-3>.
 #include "IndependentShared.h"
 #include "IndependentDecision.h"
 #include "DumpValidation.h"
 #include "StoragePolicy.h"
+#include "ExternalWaitChains.h"
 #include <DbgHelp.h>
 #include <TlHelp32.h>
 #include <algorithm>
@@ -90,7 +92,7 @@ static int Dump(DWORD pid, const fs::path& output, int level, const fs::path& lo
 // Suspend only long enough to read a context; resume BEFORE formatting or logging.
 static void ThreadPointers(DWORD pid, const fs::path& log) {
     std::ofstream out(log.parent_path() / L"thread_snapshot.txt");
-    out << "Version 10 external thread snapshot. Stack values are candidates, NOT an unwound call stack.\n";
+    out << "Version 13 external thread snapshot. Stack values are candidates, NOT an unwound call stack.\n";
     HANDLE modules = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
     if (modules != INVALID_HANDLE_VALUE) {
         MODULEENTRY32W m{}; m.dwSize = sizeof(m);
@@ -139,6 +141,46 @@ static void ThreadPointers(DWORD pid, const fs::path& log) {
     Log(log, "external thread/module snapshot saved");
 }
 static bool Down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+// A disposable process contains blocking WCT calls. Unlike the capture worker,
+// this process never suspends target threads and can safely be stopped on timeout.
+static void WaitChainsBounded(DWORD pid, const fs::path& folder, const wchar_t* mappingName) {
+    const auto log = folder / L"capture.log";
+    wchar_t exe[32768]{};
+    if (!GetModuleFileNameW(nullptr, exe, 32768)) { Log(log, "wait chains FAILED: helper path unavailable"); return; }
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+        if (job) CloseHandle(job);
+        Log(log, "wait chains SKIPPED: unable to establish child-process cleanup"); return;
+    }
+    std::wstring command = L"\"" + std::wstring(exe) + L"\" --waitchains " + std::to_wstring(pid) +
+        L" \"" + folder.wstring() + L"\" \"" + mappingName + L"\"";
+    STARTUPINFOW si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_SUSPENDED,
+        nullptr, nullptr, &si, &pi)) {
+        Log(log, "wait chains FAILED: process launch error " + std::to_string(GetLastError()));
+        CloseHandle(job); return;
+    }
+    if (!AssignProcessToJobObject(job, pi.hProcess) || ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) {
+        Log(log, "wait chains FAILED: child setup error " + std::to_string(GetLastError()));
+        TerminateProcess(pi.hProcess, 12); // Only our new, non-capturing child.
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess); CloseHandle(job); return;
+    }
+    CloseHandle(pi.hThread);
+    const DWORD wait = WaitForSingleObject(pi.hProcess, 5000);
+    if (wait == WAIT_OBJECT_0) {
+        DWORD code = 1;
+        if (!GetExitCodeProcess(pi.hProcess, &code)) code = 1;
+        Log(log, "wait chains child finished, exit code " + std::to_string(code));
+    } else {
+        Log(log, wait == WAIT_TIMEOUT ? "wait chains PARTIAL: five-second deadline exceeded" : "wait chains FAILED: child wait error");
+        // Job close kills this child only, including if the parent exits unexpectedly.
+    }
+    CloseHandle(job);
+    CloseHandle(pi.hProcess);
+}
 static void Prune(const fs::path& root, const std::wstring& prefix, DWORD keep) {
     std::error_code ec;
     std::vector<fs::path> paths;
@@ -173,7 +215,7 @@ static int Watch(DWORD pid, const wchar_t* mappingName, const fs::path& root) {
     HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, mappingName);
     if (!mapping) { CloseHandle(process); return 6; }
     auto p = static_cast<IndependentShared*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(IndependentShared)));
-    if (!p || p->version != 10 || p->pid != pid) {
+    if (!p || p->version != kIndependentProtocol || p->pid != pid) {
         if (p) UnmapViewOfFile(p); CloseHandle(mapping); CloseHandle(process); return 7;
     }
     TargetLifetime lifetime(pid, p->targetCreationTime);
@@ -182,7 +224,7 @@ static int Watch(DWORD pid, const wchar_t* mappingName, const fs::path& root) {
     fs::create_directories(root, ec);
     PruneMonitorLogs(root);
     const auto log = root / (L"independent_" + Stamp() + L".log");
-    Log(log, "version 10 independent watchdog ready; focus never suppresses capture; target pid " + std::to_string(pid));
+    Log(log, "version 13 independent watchdog ready (protocol 13); manual capture available during startup; focus never suppresses capture; target pid " + std::to_string(pid));
     wchar_t exe[32768]{}; GetModuleFileNameW(nullptr, exe, 32768);
     HANDLE worker = nullptr;
     bool workerManual = false;
@@ -192,6 +234,7 @@ static int Watch(DWORD pid, const wchar_t* mappingName, const fs::path& root) {
     bool incompleteCleaned = false;
     IndependentDecision::Episode episode;
     IndependentDecision::KeyHold key;
+    IndependentDecision::ManualRequest manualRequest;
     while (WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
         const auto now = GetTickCount64();
         InterlockedExchange64(&p->helperTick, static_cast<LONG64>(now));
@@ -215,21 +258,32 @@ static int Watch(DWORD pid, const wchar_t* mappingName, const fs::path& root) {
         const bool modifiers = (!(p->modifiers & 1) || Down(VK_SHIFT)) &&
             (!(p->modifiers & 2) || Down(VK_CONTROL)) && (!(p->modifiers & 4) || Down(VK_MENU));
         const bool pressed = p->key && key.Poll(Down(static_cast<int>(p->key)), modifiers, now, p->holdMs);
-        const bool manual = pressed && (!lastManual || now - lastManual >= 3000);
-        if (manual) lastManual = now;
+        if (manualRequest.Expire(now)) Log(log, "pending manual capture SKIPPED: capture gate remained busy for 180 seconds");
+        if (pressed && (!lastManual || now - lastManual >= 3000)) {
+            lastManual = now;
+            if (manualRequest.Queue(now)) Log(log, "manual capture queued (window focus ignored); waiting for capture gate if busy");
+            else Log(log, "manual capture already pending; duplicate request coalesced");
+        }
+        const bool manual = manualRequest.pending;
+        // Read the readiness gate BEFORE its clocks. GameReady clears startup
+        // clocks before publishing this flag, so a racing poll cannot combine
+        // an old startup heartbeat with the newly enabled automatic gate.
+        const bool gameReady = ReadFlag(&p->gameReady) != 0;
         const bool loading = ReadFlag(&p->loading) != 0;
-        const auto heartbeat = static_cast<ULONGLONG>(ReadTick(loading ? &p->progressTick : &p->frameTick));
+        // (12) While the plugin reports a shader compile on the main thread, that counts as a heartbeat
+        const auto heartbeat = loading ? static_cast<ULONGLONG>(ReadTick(&p->progressTick)) :
+                                         (std::max)(static_cast<ULONGLONG>(ReadTick(&p->frameTick)), static_cast<ULONGLONG>(ReadTick(&p->shaderTick)));
         const auto owner = ReadFlag(&p->captureOwner);
         const bool automatic = episode.ObserveState(now, heartbeat, loading ? p->loadMs : p->frameMs,
             worker != nullptr || owner == 1 || owner == 2,
-            static_cast<ULONGLONG>(ReadTick(&p->captureEndTick)), loading, p->captureLoading != 0) && autoCount < p->maxCaptures;
+            static_cast<ULONGLONG>(ReadTick(&p->captureEndTick)), loading, p->captureLoading != 0, gameReady) && autoCount < p->maxCaptures;
         if (manual || automatic) {
-            if (manual) Log(log, "manual capture requested (window focus ignored)");
             if (worker) {
-                if (manual) Log(log, "manual capture not started: an independent capture is already running");
+                // Retain a manual request until the current worker finishes.
             } else if (InterlockedCompareExchange(&p->captureOwner, 2, 0) != 0) {
-                if (manual) Log(log, "manual request busy: another diagnostic operation owns the capture gate");
+                // Retry the pending request on the next monitor tick.
             } else {
+                if (manual) manualRequest.Started();
                 // Consume this episode before starting any work. Transient progress
                 // during a capture cannot cause an immediate second automatic capture.
                 episode.Captured();
@@ -310,11 +364,29 @@ struct WorkerLease {
     }
 };
 static int Main(int argc, wchar_t** argv) {
+    if (argc == 5 && wcscmp(argv[1], L"--waitchains") == 0) {
+        // Do not use WorkerLease: the parent capture worker owns the shared gate.
+        HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, argv[4]);
+        if (!mapping) return 6;
+        auto p = static_cast<const IndependentShared*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, sizeof(IndependentShared)));
+        DWORD pid = static_cast<DWORD>(wcstoul(argv[2], nullptr, 10));
+        if (!p || p->version != kIndependentProtocol || p->pid != pid || !pid) {
+            if (p) UnmapViewOfFile(p);
+            CloseHandle(mapping); return 6;
+        }
+        // Read-only mapping: volatile read, not an interlocked operation that writes.
+        const DWORD mainTid = static_cast<DWORD>(p->mainThreadId);
+        const ULONGLONG creation = p->targetCreationTime;
+        UnmapViewOfFile(p); CloseHandle(mapping);
+        TargetLifetime lifetime(pid, creation);
+        if (!lifetime) return 11;
+        return ExternalWaitChains::Collect(pid, mainTid, fs::path(argv[3]) / L"wait_chains.txt");
+    }
     if (argc == 5 && wcscmp(argv[1], L"--watch") == 0)
         return Watch(static_cast<DWORD>(wcstoul(argv[2], nullptr, 10)), argv[3], fs::path(argv[4]));
     if (argc == 6 && wcscmp(argv[1], L"--capture") == 0) {
         WorkerLease lease(argv[5]);
-        if (!lease.p || lease.p->version != 10) return 6;
+        if (!lease.p || lease.p->version != kIndependentProtocol) return 6;
         DWORD pid = static_cast<DWORD>(wcstoul(argv[2], nullptr, 10));
         int level = _wtoi(argv[4]);
         if (!pid || level < 0 || level > 3) return 2;
@@ -326,8 +398,11 @@ static int Main(int argc, wchar_t** argv) {
         int result = 0;
         // Small dump FIRST, before any optional larger dump or detailed thread work.
         if (level) result = Dump(pid, folder / L"SkyrimSE.dmp", 1, log);
-        if (level > 1 && result == 0) result = Dump(pid, folder / L"SkyrimSE_extended.dmp", level, log);
+        // Save initial evidence before starting potentially blocking wait-chain queries.
         if (!level || result != 0) ThreadPointers(pid, log);
+        if (lease.p->waitChains) WaitChainsBounded(pid, folder, argv[5]);
+        else Log(log, "wait chains SKIPPED: bWaitChains=0");
+        if (level > 1 && result == 0) result = Dump(pid, folder / L"SkyrimSE_extended.dmp", level, log);
         Log(log, "capture worker finished, result " + std::to_string(result));
         return result;
     }
@@ -348,6 +423,7 @@ int wmain(int argc, wchar_t** argv) {
         try {
             fs::path folder;
             if (argc == 5 && wcscmp(argv[1], L"--watch") == 0) folder = argv[4];
+            else if (argc == 5 && wcscmp(argv[1], L"--waitchains") == 0) folder = argv[3];
             else if (argc == 6 && wcscmp(argv[1], L"--capture") == 0) folder = argv[3];
             else if (argc == 4) folder = fs::path(argv[2]).parent_path();
             if (!folder.empty()) Log(folder / L"independent_error.log", e.what());

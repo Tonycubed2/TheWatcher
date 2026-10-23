@@ -5,6 +5,29 @@
 #include <iostream>
 using namespace IndependentDecision;
 int main() {
+    // Startup may render a few frames and then spend minutes loading plugins.
+    // Neither gameplay nor loading captures may fire before DataLoaded.
+    Episode startup;
+    assert(!startup.ObserveState(9000, 1000, 8000, false, 0, false, false, false));
+    assert(!startup.ObserveState(600000, 1000, 8000, false, 0, false, false, false));
+    assert(!startup.ObserveState(600000, 1000, 300000, false, 0, true, true, false));
+    // A released manual key remains queued even while automatic detection is off.
+    KeyHold startupKey;
+    ManualRequest startupRequest;
+    assert(startupKey.Poll(true, true, 600000, 0));
+    assert(startupRequest.Queue(600000));
+    assert(!startupKey.Poll(false, true, 600020, 0));
+    assert(startupRequest.pending);
+    startupRequest.Started();
+    assert(!startupRequest.pending);
+    // GameReady clears old clocks. No automatic capture until a new heartbeat;
+    // after one arrives, the configured threshold and loading opt-in still apply.
+    assert(!startup.ObserveState(600100, 0, 8000, false, 0, false, false, true));
+    assert(!startup.ObserveState(608999, 601000, 8000, false, 0, false, false, true));
+    assert(startup.ObserveState(609000, 601000, 8000, false, 0, false, false, true));
+    Episode startupLoading;
+    assert(!startupLoading.ObserveState(901000, 601000, 300000, false, 0, true, false, true));
+    assert(startupLoading.ObserveState(901000, 601000, 300000, false, 0, true, true, true));
     Episode e;
     assert(!e.Observe(8999, 1000, 8000, false, 0));
     assert(e.Observe(9000, 1000, 8000, false, 0));

@@ -1,4 +1,8 @@
-# The Watcher — version 10
+## Version 13: startup capture update
+
+Build and install TheWatcher.dll and TheWatcherDump.exe together from this source; the IPC protocol is now 13. Existing INI settings remain supported. The helper starts during plugin initialization and accepts the configured manual key before DataLoaded. External automatic capture remains off until game monitoring initializes and a fresh heartbeat arrives. Event sinks and the in-game watchdog still start at DataLoaded. See BUILD_VERSION_13.txt for build steps, validation steps and limitations.
+
+# The Watcher — version 13
 
 Reduces capture interference during legitimate loading and improves helper lifetime,
 dump integrity and storage retention. Gameplay freeze detection remains 8 seconds.
@@ -40,6 +44,31 @@ Snapshot-based PSS dumps are not implemented in this release. Enabling optional 
 process dumps can still pause Skyrim while Windows writes them. Dumps remain disabled
 by default; full memory still requires both level 3 and `bAllowFullMemoryDump=1`.
 
+## External wait chains and resource attribution (introduced in version 12)
+
+When `bWaitChains=1`, captures save `wait_chains.txt` from a separate process.
+The capture worker saves its initial snapshot/small dump before starting this
+process. The WCT child never suspends target threads. A job object binds its
+lifetime to the capture worker; a five-second deadline stops only this child.
+Logs distinguish setup failures, unavailable queries and incomplete timeout
+results. The file is flushed before each query so earlier results survive a timeout.
+The main thread is queried first. WCT cannot diagnose every wait type, and no
+reported cycle does not prove that the game is free of deadlocks. This release
+does not register COM-specific WCT callbacks, so COM resolution may be incomplete.
+
+Optional `iMinidumpLevel=1` already provides a small dump for debugger stack
+analysis. Raw stack snapshots remain candidates, not unwound call stacks; live
+external stack unwinding has not been added. Dump sizes, pause duration and
+successful debugger unwinding are not guaranteed.
+
+Resource reports use confirmed entry-module locations, inferred stack origins,
+and unknown origins. A thread's entry module is not proof of who consumed all
+its CPU time. Thread-name hints are self-reported and are never used to assign
+ownership. `iResourceSampleThreads=0` still disables resource stack sampling.
+When enabled, the per-tick limit now bounds all resource stack capture attempts,
+including new-thread attribution and failed attempts. Loading stays excluded.
+No in-game overhead benchmark has been performed.
+
 ## Storage
 
 `iMaxStorageMB=1024` in General sets a 1024 MiB (1 GiB) soft cap for the TheWatcher
@@ -61,7 +90,7 @@ Command Prompt for VS 2022:
 
 Install `build/release-msvc/TheWatcher.dll`, its matching `TheWatcher.pdb`,
 `build/release-msvc/TheWatcherDump.exe`, and the included `TheWatcher.ini` together
-in SKSE/Plugins. Both DLL and EXE must be version 10. The helper launches automatically.
+in SKSE/Plugins. Both DLL and EXE must be version 13. The helper launches automatically.
 Use the new INI to apply the updated defaults; old INI overrides may retain heavier settings.
 
 ## Validation and limits
@@ -72,6 +101,11 @@ without automatic captures, explicit loading opt-in, loading/gameplay transition
 and truncated dump metadata/payloads, retention ordering, protected files, disabled caps,
 partial cleanup and symlink exclusion. INI and source/build protocol checks are included.
 
-Windows/MSVC compilation and in-game timing were not available here. This package is
-source, not compiled binaries. The changes remove identified sources of interference;
+A Windows integration test in `tests/external_waitchains_test.cpp` checks a
+real mutex wait. That Windows integration test and in-game timing have not been validated. The maintainer has compiled the Windows binaries (see below). This repository contains source, not compiled binaries. The changes remove identified sources of interference;
 they do not prove zero overhead or fix every underlying Skyrim freeze.
+
+
+## Validation of version 13
+
+The Windows DLL and helper were built by the maintainer. Inspection confirmed the DLL exports plugin version 13, both binaries include the version 13 startup changes, the helper identifies protocol 13, and the DLL matches its PDB. Portable capture-policy and hotkey regression checks passed. In-game startup/manual-capture validation is still pending; the source change improves capture coverage and does not establish the cause of an underlying Skyrim hang.

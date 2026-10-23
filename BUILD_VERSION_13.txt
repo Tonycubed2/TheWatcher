@@ -1,0 +1,46 @@
+VERSION 13 STARTUP FIX - BUILD COMMANDS
+
+Extract into C:\dllmaker\TheWatcher, replacing the old source files.
+Open x64 Native Tools Command Prompt for VS 2022 and paste one line at a time:
+
+cd /d C:\dllmaker\TheWatcher
+cmake --preset build-release-msvc
+cmake --build --preset release-msvc --parallel 1
+
+Install together in your MO2 mod's SKSE\Plugins folder:
+- build\release-msvc\TheWatcher.dll
+- build\release-msvc\TheWatcher.pdb
+- build\release-msvc\TheWatcherDump.exe
+- TheWatcher.ini from this source ZIP
+
+Both binaries MUST be rebuilt from this 13 source. Helper protocol is now 13; older v12 helpers are incompatible.
+The EXE starts automatically. Do not run it manually.
+
+Defaults: 8-second gameplay detection, loading capture OFF, dumps OFF,
+reduced diagnostics during loading, 1024 MiB soft retention cap.
+The cap deletes old dumps first from the TheWatcher subfolder only.
+
+This package contains source. Portable regression checks passed. The maintainer built the Windows DLL/helper; their version 13 markers and matching DLL/PDB were inspected. In-game execution has not yet been validated.
+
+Optional Windows WCT integration test from the same developer prompt:
+cl /std:c++20 /EHsc tests\external_waitchains_test.cpp /link advapi32.lib
+external_waitchains_test.exe
+
+This Windows integration test has NOT been run here.
+
+STARTUP TEST (SE 1.5.97 and AE 1.6.1170)
+1. Build and install BOTH binaries above. Retain your configured INI/hotkey if desired.
+2. Start Skyrim from the same MO2 Stock Game entry as usual.
+3. TheWatcher.log should report helper launch and listener registration BEFORE Address Library/frame-hook installation.
+4. During a pre-menu hang, press your configured key (F12 by default, F11 if configured).
+5. Check SKSE\TheWatcher\independent_manual_* for capture.log, thread_snapshot.txt and, if enabled, wait_chains.txt.
+6. A normal long startup must NOT create independent_emergency_* captures before DataLoaded.
+7. After DataLoaded and a new heartbeat, existing gameplay/loading policies resume.
+8. Exit Skyrim and confirm the helper exits. Repeat startup and save loading to check normal behavior.
+
+LIMITATIONS
+- Source package only. Windows DLL/helper compilation was performed by the maintainer and the binaries were inspected. Skyrim execution has not yet been validated.
+- The early helper starts once this plugin's load function reaches settings initialization. It cannot diagnose a hang before this plugin loads.
+- External manual capture needs bIndependentWatchdog=1 and a valid enabled hotkey. If the helper fails, in-game polling still starts at DataLoaded.
+- Captures before DataLoaded provide external thread/module evidence; the in-game context report is unavailable until game monitoring starts.
+- Missing DataLoaded/registration failure now leaves the helper available for manual capture; automatic detection remains disarmed.

@@ -1,8 +1,16 @@
 {
     "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
     "name": "thewatcher",
-    "version-string": "10",
+    "version-string": "13",
     "dependencies": [
-        "commonlibsse-ng-fork"
+        "directxmath",
+        "directxtk",
+        "fmt",
+        "nlohmann-json",
+        "rapidcsv",
+        "simpleini",
+        "spdlog",
+        "toml11",
+        "xbyak"
     ]
 }

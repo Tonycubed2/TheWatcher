@@ -31,6 +31,11 @@ namespace Capture
 
 	[[nodiscard]] std::size_t HistoryCount();
 
+	// (12) Shader-compile check. Copies the main thread's stack (brief suspend, like a history sample) and returns the
+	// file name of the first module on it whose lower-case name contains one of a_patterns (e.g. "d3dcompiler"),
+	// or "" when none matches or the thread could not be read. Watchdog thread only.
+	std::string MainThreadInModule(std::uint32_t a_mainTid, const std::vector<std::string>& a_patterns);
+
 	struct SlowEpisode
 	{
 		bool         loading = false;    // loading-screen gap (true) or in-game hitch (false)

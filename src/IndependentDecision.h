@@ -1,6 +1,25 @@
 #pragma once
 #include <cstdint>
 namespace IndependentDecision {
+// One pending manual request. Repeated presses coalesce without extending its
+// deadline; a busy diagnostic must not cause stale captures minutes later.
+struct ManualRequest {
+    bool pending = false;
+    std::uint64_t since = 0;
+    static constexpr std::uint64_t timeoutMs = 180000;
+    bool Queue(std::uint64_t now) {
+        if (pending) return false;
+        pending = true;
+        since = now;
+        return true;
+    }
+    bool Expire(std::uint64_t now) {
+        if (!pending || now < since || now - since < timeoutMs) return false;
+        pending = false;
+        return true;
+    }
+    void Started() { pending = false; }
+};
 inline bool Stalled(std::uint64_t now, std::uint64_t heartbeat, std::uint64_t threshold) {
     return heartbeat != 0 && now >= heartbeat && now - heartbeat >= threshold;
 }
@@ -27,7 +46,9 @@ struct Episode {
     std::uint64_t lastEnd = 0;
     bool wasLoading = false;
     bool ObserveState(std::uint64_t now, std::uint64_t heartbeat, std::uint64_t threshold,
-                      bool busy, std::uint64_t captureEnd, bool loading, bool allowLoading) {
+                      bool busy, std::uint64_t captureEnd, bool loading, bool allowLoading,
+                      bool gameReady = true) {
+        if (!gameReady) return false; // startup frames must not arm automatic capture
         if (loading != wasLoading) {
             // Loading and gameplay are separate episodes. LoadEnd refreshes the frame heartbeat.
             captured = false;

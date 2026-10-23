@@ -12,5 +12,6 @@ set(headers ${headers}
     src/DumpValidation.h
     src/StoragePolicy.h
     src/IndependentDecision.h
+    src/ExternalWaitChains.h
     src/Hotkey.h
 )

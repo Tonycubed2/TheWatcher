@@ -248,6 +248,118 @@ namespace Watchdog
 			}
 		}
 
+		// ---------- (12) long loading screens that keep "making progress" ----------
+		// A loading screen stuck in a loop keeps firing load events, so the no-progress warning above never
+		// triggers. Once a loading screen has been open for fLoadWarnSeconds, write the recent load events and the
+		// most repeated forms, and again every fLoadWarnSeconds while it stays open.
+		std::uint64_t g_longLoadGen = ~0ull;
+		std::int64_t  g_longLoadNextNs = 0;
+
+		void CheckLongLoad(std::int64_t a_now, const Measure& a_m)
+		{
+			const auto& cfg = Settings::Get();
+			auto&       s = Monitor::Get();
+			if (!a_m.loading || cfg.recentLoadEvents <= 0) {
+				return;
+			}
+			const auto gen = s.loadGen.load();
+			const auto period = static_cast<std::int64_t>(cfg.loadWarnSec * 1e9);
+			if (gen != g_longLoadGen) {
+				g_longLoadGen = gen;
+				g_longLoadNextNs = s.loadStartNs.load() + period;
+			}
+			if (a_now < g_longLoadNextNs) {
+				return;
+			}
+			g_longLoadNextNs = a_now + period;
+			if (a_m.age >= cfg.loadWarnSec) {
+				return;  // no progress at all: the SLOW LOAD warning covers it
+			}
+			const double open = static_cast<double>(a_now - s.loadStartNs.load()) / 1e9;
+			spdlog::warn("LONG LOAD: loading screen open {:.0f}s and load events are still arriving ({} so far, last {:.1f}s ago). "
+						 "If it never finishes, the load is probably looping; the most repeated forms below are the lead.\n"
+						 "Most repeated during this load:\n{}Last {} load events (oldest first):\n{}",
+				open, s.loadEvents.load(), a_m.age, Monitor::LoadRepeatsText(15, 5), cfg.recentLoadEvents,
+				Monitor::RecentLoadsText(static_cast<std::size_t>(cfg.recentLoadEvents)));
+			Events::Write(std::format("LONG LOAD open {:.0f}s, {} load events, still arriving", open, s.loadEvents.load()));
+		}
+
+		// ---------- (12) shader compiles are not freezes ----------
+		// ENB, Effects 11 and Community Shaders compile shaders on the main thread, which stops frames for seconds on
+		// purpose. While the game is not finishing frames, the main thread's stack is checked twice a second; when it
+		// is inside a shader compiler (sShaderCompileModules) the stall is not treated as a freeze - by this watchdog
+		// or by the independent helper - for up to fShaderCompileMaxSeconds.
+		struct ShaderPause
+		{
+			bool         active = false;    // a compile was seen during the current stall
+			bool         overLimit = false; // fShaderCompileMaxSeconds reached: treat as a freeze from now on
+			std::int64_t sinceNs = 0;       // stall start (last finished frame)
+			std::int64_t lastHitNs = 0;     // last sample that was inside the compiler
+			std::int64_t lastCheckNs = 0;
+			std::string  module;
+		};
+		ShaderPause g_shader;
+
+		constexpr std::int64_t kShaderCheckAfterNs = 1'500'000'000;  // only look once a frame takes this long
+		constexpr std::int64_t kShaderCheckEveryNs = 500'000'000;
+		constexpr std::int64_t kShaderHoldNs = 3'000'000'000;        // compile sample this recent keeps the pause excused
+
+		void EndShaderPause(std::int64_t a_now, const char* a_why)
+		{
+			if (!g_shader.active) {
+				g_shader = {};
+				return;
+			}
+			const double secs = static_cast<double>(a_now - g_shader.sinceNs) / 1e9;
+			spdlog::info("Shader compile pause ended ({}) after {:.1f}s; main thread was in {}", a_why, secs, g_shader.module);
+			Events::Write(std::format("SHADER COMPILE pause {:.1f}s in {} ({})", secs, g_shader.module, a_why));
+			g_shader = {};
+		}
+
+		// Returns true while the current stall is a shader compile that must not count as a freeze
+		bool CheckShaderPause(std::int64_t a_now, const Measure& a_m)
+		{
+			const auto& cfg = Settings::Get();
+			if (!cfg.ignoreShaderCompiles || !a_m.valid || a_m.loading) {
+				EndShaderPause(a_now, a_m.loading ? "loading screen" : "off");
+				return false;
+			}
+			const auto ageNs = static_cast<std::int64_t>(a_m.age * 1e9);
+			if (ageNs < kShaderCheckAfterNs) {
+				EndShaderPause(a_now, "frames resumed");
+				return false;
+			}
+			if (g_shader.overLimit) {
+				return false;
+			}
+			if (a_now - g_shader.lastCheckNs >= kShaderCheckEveryNs) {
+				g_shader.lastCheckNs = a_now;
+				const auto hit = Capture::MainThreadInModule(Monitor::Get().mainThreadId.load(), cfg.shaderCompileModules);
+				if (!hit.empty()) {
+					g_shader.lastHitNs = a_now;
+					if (!g_shader.active) {
+						g_shader.active = true;
+						g_shader.sinceNs = a_now - ageNs;
+						g_shader.module = hit;
+						spdlog::info("Main thread is compiling shaders in {} ({:.1f}s without a frame): not treated as a freeze "
+									 "for up to {:.0f}s (bIgnoreShaderCompiles=1)", hit, a_m.age, cfg.shaderCompileMaxSec);
+					}
+				}
+			}
+			if (!g_shader.active || a_now - g_shader.lastHitNs > kShaderHoldNs) {
+				return false;
+			}
+			if (static_cast<double>(a_now - g_shader.sinceNs) / 1e9 >= cfg.shaderCompileMaxSec) {
+				g_shader.overLimit = true;
+				spdlog::warn("Main thread has been in {} for over {:.0f}s (fShaderCompileMaxSeconds): treating it as a freeze",
+					g_shader.module, cfg.shaderCompileMaxSec);
+				Events::Write(std::format("SHADER COMPILE over {:.0f}s in {}: now treated as a freeze", cfg.shaderCompileMaxSec, g_shader.module));
+				return false;
+			}
+			Independent::ShaderCompiling();  // keeps the independent helper from capturing too
+			return true;
+		}
+
 		// ---------- stall detection ----------
 
 		void EndEpisode(std::string_view a_why)
@@ -299,6 +411,13 @@ namespace Watchdog
 						static_cast<double>(a_now - s.loadStartNs.load()) / 1e9, age, s.loadEvents.load(),
 						s.loadMaxGapUs.load() / 1000.0, s.loadFrames.load(), hbMs,
 						cfg.reduceWorkDuringLoading ? std::string("loading diagnostics reduced") : Monitor::ContextLine());
+					// (12) load breadcrumbs: what the game loaded last before it went quiet
+					if (cfg.recentLoadEvents > 0) {
+						spdlog::info("Last {} load events before the loading screen went quiet (oldest first; the last lines are the best lead):\n{}"
+									 "Most repeated during this load:\n{}",
+							cfg.recentLoadEvents, Monitor::RecentLoadsText(static_cast<std::size_t>(cfg.recentLoadEvents)),
+							Monitor::LoadRepeatsText(10, 5));
+					}
 				} else {
 					spdlog::warn("WARNING: main thread has not finished a frame for {:.1f}s | {}", age, Monitor::ContextLine());
 				}
@@ -477,7 +596,10 @@ namespace Watchdog
                     }
 					const auto m = Take(now);
 					CheckSlow(now, m);
-					CheckStall(now, m);
+					if (!CheckShaderPause(now, m)) {
+						CheckStall(now, m);
+					}
+					CheckLongLoad(now, m);
 					const bool reducedLoad = m.loading && cfg.reduceWorkDuringLoading;
 					const auto statusInterval = reducedLoad ? 10'000'000'000LL : 1'000'000'000LL;
 					if (cfg.statusFile && now - lastStatus >= statusInterval) {

@@ -13,6 +13,28 @@ namespace Capture
 {
 	namespace
 	{
+		// Top-left HUD message. CommonLibSSE-NG 6.7.0 no longer has RE::DebugNotification, so the game function is
+		// called directly (ID 52050 SE/VR, 52933 AE; checked present on 1.7.104). On AE the ID is looked up without
+		// CommonLib's fatal error, so a future game version without it just skips the message.
+		void ShowNotification(const char* a_text)
+		{
+			using func_t = void(const char*, const char*, bool);
+			if (REL::Module::IsAE()) {
+				std::uintptr_t off = 0;
+				if (!AddressLib::IdToOffset(52933, off)) {
+					spdlog::warn("In-game notification skipped (Address Library ID 52933 not found): {}", a_text);
+					return;
+				}
+				reinterpret_cast<func_t*>(REL::Module::get().base() + off)(a_text, nullptr, true);
+				return;
+			}
+			REL::Relocation<func_t> func{ RELOCATION_ID(52050, 52933) };
+			func(a_text, nullptr, true);
+		}
+	}
+
+	namespace
+	{
 		constexpr std::size_t kMaxFrames = 64;
 		// (1.1) 256 KB: the stack is now copied and unwound from the copy, so the copy must hold the whole walk
 		constexpr std::size_t kStackCopyBytes = 256 * 1024;
@@ -224,6 +246,37 @@ namespace Capture
 		}
 
 		bool IsGame(const Module* a_m) { return a_m && _stricmp(a_m->name.c_str(), "SkyrimSE.exe") == 0; }
+
+		// (12) First module on the stack whose lower-case file name contains one of the patterns, or ""
+		std::string StackModuleMatch(const ThreadStack& a_ts, const std::vector<Module>& a_mods, const std::vector<std::string>& a_patterns)
+		{
+			if (a_patterns.empty()) {
+				return {};
+			}
+			auto check = [&](std::uintptr_t a_addr) -> std::string {
+				const auto m = FindModule(a_mods, a_addr);
+				if (!m) {
+					return {};
+				}
+				std::string lower = m->name;
+				std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+				for (const auto& p : a_patterns) {
+					if (!p.empty() && lower.find(p) != std::string::npos) {
+						return m->name;
+					}
+				}
+				return {};
+			};
+			if (auto hit = check(a_ts.rip); !hit.empty()) {
+				return hit;
+			}
+			for (std::size_t i = 0; i < a_ts.count; ++i) {
+				if (auto hit = check(a_ts.frames[i]); !hit.empty()) {
+					return hit;
+				}
+			}
+			return {};
+		}
 
 		std::string Describe(const std::vector<Module>& a_mods, std::uintptr_t a_addr)
 		{
@@ -590,7 +643,7 @@ namespace Capture
 			return {};
 		}
 
-		// Returns: 1 written, 0 helper ran but failed or timed out, -1 helper not available
+		// Returns: 1 written, 0 helper launch/run failed, 2 helper still running at the deadline, -1 helper not available
 		int WriteDumpExternal(const std::filesystem::path& a_file, int a_level)
 		{
 			const auto exe = HelperPath();
@@ -604,7 +657,7 @@ namespace Capture
 			si.cb = sizeof(si);
 			if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
 				spdlog::error("Could not start {} (error {})", exe.string(), GetLastError());
-				return -1;
+				return 0;  // An attempted launch failed; the helper was not intentionally skipped.
 			}
 			const DWORD timeout = a_level >= 3 ? 30 * 60 * 1000 : 3 * 60 * 1000;
 			const DWORD wait = WaitForSingleObject(pi.hProcess, timeout);
@@ -618,6 +671,9 @@ namespace Capture
 			CloseHandle(pi.hProcess);
 			if (wait == WAIT_OBJECT_0 && code != 0) {
 				spdlog::error("Dump helper failed (exit code {})", code);
+			}
+			if (wait == WAIT_TIMEOUT) {
+				return 2;  // Not a failure yet: the helper may still finish and validate the dump.
 			}
 			return (wait == WAIT_OBJECT_0 && code == 0) ? 1 : 0;
 		}
@@ -733,15 +789,20 @@ namespace Capture
 		{
 			const auto& s = Monitor::Get();
 			const auto  c = Monitor::GetContext();
-			const auto  p = Monitor::ReadPapyrus();
+			std::string papyrus = "null";
+			if (Settings::Get().papyrusStats) {
+				const auto p = Monitor::ReadPapyrus();
+				papyrus = std::format("{{\"running_stacks\":{},\"latent_waits\":{},\"queued_messages\":{},\"overstressed\":{}}}",
+					p.runningStacks, p.latentWaits, p.queuedMessages, p.overstressed);
+			}
 			return std::format(
 				"{{\"cell_formid\":\"{:08X}\",\"cell_name\":{},\"interior\":{},\"worldspace\":{},\"grid\":[{},{}],\"pos\":[{:.0f},{:.0f},{:.0f}],"
 				"\"location\":{},\"open_menus\":{},\"load_kind\":{},\"high_actors\":{},\"spawned_actors\":{},\"mid_high_actors\":{},\"low_actors\":{},"
-				"\"actor_plugins\":{},\"spawned_plugins\":{},\"papyrus\":{{\"running_stacks\":{},\"latent_waits\":{},\"queued_messages\":{},\"overstressed\":{}}}}}",
+				"\"actor_plugins\":{},\"spawned_plugins\":{},\"papyrus\":{}}}",
 				s.cellFormID.load(), Util::Json(c.cellName), s.cellInterior.load() ? "true" : "false", Util::Json(c.worldspace), s.gridX.load(), s.gridY.load(),
 				s.posX.load(), s.posY.load(), s.posZ.load(), Util::Json(c.location), Util::Json(c.openMenus), Util::Json(c.loadKind),
 				s.highActors.load(), s.spawnedActors.load(), s.midHighActors.load(), s.lowActors.load(), Util::Json(c.actorPlugins), Util::Json(c.spawnPlugins),
-				p.runningStacks, p.latentWaits, p.queuedMessages, p.overstressed);
+				papyrus);
 		}
 
 		int BackupLogs(const std::filesystem::path& a_dst, const std::filesystem::path& a_statsFile)
@@ -852,8 +913,8 @@ namespace Capture
 	// ---------- (version 5) resource profiler: which mods are using CPU ----------
 	// Runs on the watchdog thread only (it shares g_work with the stack capture code).
 	// Three views, all in "% of one CPU core":
-	//   1. CPU by thread owner: every thread's CPU time, credited to the DLL whose code runs the thread.
-	//      Threads started through the C runtime (std::thread etc.) are traced back to the DLL that created them.
+	//   1. CPU by thread attribution: confirmed entry-address module or an inferred stack origin.
+	//      Neither proves ownership of every CPU tick; generic runtime starts may remain unknown.
 	//   2. Mod code running on game threads: the busiest game threads (main + job threads) are sampled; when the
 	//      code executing at that moment belongs to a mod DLL, that mod is credited. Strongest evidence.
 	//   3. Nearest mod on game-thread call stacks: the innermost mod DLL on the sampled stack, i.e. the mod whose
@@ -867,6 +928,9 @@ namespace Capture
 			bool          game = false;
 			std::uint64_t lastCpu = 0;
 			bool          seen = false;
+			// Generic-start thread whose one stack-origin attempt was deferred because the
+			// per-tick budget was spent. Retried on later ticks, still within that budget.
+			bool          originDeferred = false;
 		};
 
 		using Tally = std::unordered_map<std::string, std::uint64_t>;  // 100 ns units of CPU time
@@ -939,16 +1003,41 @@ namespace Capture
 			return false;
 		}
 
-		// Name of the DLL that runs the thread, and whether that is the game executable.
-		// Start address first; threads started through the C runtime are traced through one stack sample:
-		// the deepest non-plumbing frame (closest to the thread's start) is the DLL that created it.
-		std::string ThreadOwner(DWORD a_tid, HANDLE a_thread, bool& a_game)
+		// A thread description is a self-reported hint, never evidence of DLL ownership.
+		std::string ThreadDescription(HANDLE a_thread)
+		{
+			using GetDescription_t = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+			static const auto getDescription = [] {
+				auto proc = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
+				if (!proc) {
+					if (const auto base = GetModuleHandleW(L"KernelBase.dll")) proc = GetProcAddress(base, "GetThreadDescription");
+				}
+				return reinterpret_cast<GetDescription_t>(proc);
+			}();
+			PWSTR description = nullptr;
+			if (!getDescription || FAILED(getDescription(a_thread, &description)) || !description) return {};
+			// Copy to fixed storage and release Windows memory before allocating our string.
+			char text[81]{};
+			for (unsigned i = 0; i < 80 && description[i]; ++i) {
+				wchar_t ch = description[i];
+				text[i] = ch >= 32 && ch < 127 ? static_cast<char>(ch) : '?';
+			}
+			LocalFree(description);
+			return text;
+		}
+
+		// Start address is confirmed location evidence. A deepest non-system frame
+		// is only an inferred origin, especially for shared runtime/thread-pool workers.
+		// a_deferred: set when a generic-start thread was not sampled only because the
+		// shared per-tick budget was already spent (never set when the budget is 0).
+		std::string ThreadOwner(DWORD a_tid, HANDLE a_thread, bool& a_game, int& a_samplesRemaining, bool& a_deferred)
 		{
 			using NtQueryInformationThread_t = LONG(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
 			static const auto s_query = reinterpret_cast<NtQueryInformationThread_t>(
 				GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread"));
 
 			a_game = false;
+			a_deferred = false;
 			PVOID start = nullptr;
 			constexpr ULONG kThreadQuerySetWin32StartAddress = 9;
 			const Module*   startMod = nullptr;
@@ -957,21 +1046,32 @@ namespace Capture
 			}
 			if (startMod && !IsPlumbing(startMod->name)) {
 				a_game = IsGameModule(*startMod);
-				return a_game ? std::string("game (") + startMod->name + ")" : startMod->name;
+				return (a_game ? std::string("game (") + startMod->name + ")" : startMod->name) + " [confirmed entry module]";
 			}
 
 			// Generic start (std::thread, _beginthreadex, thread pool): look at the stack once
 			ThreadStack ts;
-			if (Settings::Get().resourceSampleThreads > 0 && CaptureThread(a_tid, ts, false)) {
+			bool captured = false;
+			if (a_samplesRemaining > 0) {
+				--a_samplesRemaining; // Bound attempts, including failures and new-thread discovery.
+				captured = CaptureThread(a_tid, ts, false);
+			} else if (Settings::Get().resourceSampleThreads > 0) {
+				a_deferred = true; // budget spent this tick; not a final "unknown"
+			}
+			if (captured) {
 				for (std::size_t i = ts.count; i-- > 0;) {
 					const auto m = FindModule(g_profMods, ts.frames[i]);
 					if (m && !IsPlumbing(m->name) && !IsSystemModule(m->name)) {
 						a_game = IsGameModule(*m);
-						return a_game ? std::string("game (") + m->name + ")" : m->name + " (via C runtime thread)";
+						return (a_game ? std::string("game (") + m->name + ")" : m->name) + " [inferred stack origin]";
 					}
 				}
 			}
-			return startMod ? startMod->name + " (owner unknown)" : std::string("(owner unknown)");
+			const char* state = a_deferred ? " [origin not yet sampled]" : " [origin unknown]";
+			std::string label = startMod ? startMod->name + state : std::string(state + 1);
+			const auto description = ThreadDescription(a_thread);
+			if (!description.empty()) label += " [thread name hint: " + description + "]";
+			return label;
 		}
 
 		void Add(ProfWindow& a_w, const ProfWindow& a_from)
@@ -1023,7 +1123,7 @@ namespace Capture
 		std::string FormatWindow(const ProfWindow& a_recent, const ProfWindow& a_session, int a_top, std::string_view a_recentLabel)
 		{
 			std::string out;
-			FormatTally(out, "CPU by thread owner (% of one CPU core)", a_recent.owner, a_recent.seconds, a_session.owner, a_session.seconds,
+			FormatTally(out, "CPU by thread attribution (% of one CPU core)", a_recent.owner, a_recent.seconds, a_session.owner, a_session.seconds,
 				a_top, a_recentLabel);
 			FormatTally(out, "Mod code running on game threads", a_recent.self, a_recent.seconds, a_session.self, a_session.seconds,
 				a_top, a_recentLabel);
@@ -1032,6 +1132,8 @@ namespace Capture
 			out += std::format("  (game threads used {:.1f}% of a core recently; {:.0f}% of that was sampled for the two game-thread views)\n",
 				Pct(a_recent.gameCpu, a_recent.seconds),
 				a_recent.gameCpu ? 100.0 * static_cast<double>(a_recent.sampledCpu) / static_cast<double>(a_recent.gameCpu) : 0.0);
+			out += "  Entry module = confirmed thread start location, not ownership of every CPU tick.\n"
+			       "  Stack origin = inference; thread names = self-reported hints; unknown stays unknown.\n";
 			return out;
 		}
 
@@ -1100,6 +1202,7 @@ namespace Capture
 			t.seen = false;
 		}
 		std::vector<std::pair<DWORD, std::uint64_t>> busy;
+		int samplesRemaining = cfg.resourceSampleThreads;
 		for (const auto tid : ThreadIds()) {
 			if (tid == self) {
 				continue;
@@ -1112,7 +1215,7 @@ namespace Capture
 				}
 				ProfThread pt;
 				pt.handle = h;
-				pt.owner = ThreadOwner(tid, h, pt.game);
+				pt.owner = ThreadOwner(tid, h, pt.game, samplesRemaining, pt.originDeferred);
 				pt.lastCpu = ThreadCpu(h);
 				pt.seen = true;
 				g_prof.emplace(tid, std::move(pt));
@@ -1120,6 +1223,11 @@ namespace Capture
 			}
 			auto& pt = it->second;
 			pt.seen = true;
+			if (pt.originDeferred && samplesRemaining > 0) {
+				// One more bounded attempt for a thread that missed the budget when discovered.
+				// CPU already tallied stays under the earlier label; only later CPU moves.
+				pt.owner = ThreadOwner(tid, pt.handle, pt.game, samplesRemaining, pt.originDeferred);
+			}
 			const auto cpu = ThreadCpu(pt.handle);
 			const auto delta = cpu > pt.lastCpu ? cpu - pt.lastCpu : 0;
 			pt.lastCpu = cpu;
@@ -1144,16 +1252,15 @@ namespace Capture
 		// 2) Sample the busiest game threads
 		std::sort(busy.begin(), busy.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
 		const auto minTicks = static_cast<std::uint64_t>(tickSec * 1e7 * 0.02);  // at least 2% of a core this tick
-		int sampled = 0;
 		for (const auto& [tid, delta] : busy) {
-			if (sampled >= cfg.resourceSampleThreads || delta < minTicks) {
+			if (samplesRemaining <= 0 || delta < minTicks) {
 				break;
 			}
+			--samplesRemaining;
 			ThreadStack ts;
 			if (!CaptureThread(tid, ts, false)) {
 				continue;
 			}
-			++sampled;
 			g_winCur.sampledCpu += delta;
 
 			// Executing code: the first frame that is not Windows / C runtime plumbing
@@ -1475,6 +1582,36 @@ namespace Capture
 
 	std::size_t HistoryCount() { return g_histCount; }
 
+	std::string MainThreadInModule(std::uint32_t a_mainTid, const std::vector<std::string>& a_patterns)
+	{
+		if (a_mainTid == 0 || a_patterns.empty()) {
+			return {};
+		}
+		Independent::Guard guard;  // never while a capture or another sample owns the gate
+		if (!guard) {
+			return {};
+		}
+		ThreadStack ts;
+		if (!CaptureThread(a_mainTid, ts, false)) {
+			return {};
+		}
+		static std::vector<Module> mods;
+		static std::int64_t        modsNs = 0;
+		const auto                 now = Monitor::NowNs();
+		if (mods.empty() || now - modsNs > 10'000'000'000LL) {  // module list refreshed at most every 10 s
+			mods = EnumModules();
+			modsNs = now;
+		}
+		auto hit = StackModuleMatch(ts, mods, a_patterns);
+		if (hit.empty()) {
+			// A compiler DLL loaded since the last refresh would not be in the cached list
+			mods = EnumModules();
+			modsNs = now;
+			hit = StackModuleMatch(ts, mods, a_patterns);
+		}
+		return hit;
+	}
+
 	std::string ReportSlowEpisode(const SlowEpisode& a_ep)
 	{
 		const auto mods = EnumModules();
@@ -1519,7 +1656,7 @@ namespace Capture
 		std::error_code ec;
 		std::filesystem::create_directories(folder, ec);
 
-		Util::WriteFileAtomic(folder / "capture_started.txt", std::format("Version 10 capture requested: {}\n", a_reason));
+		Util::WriteFileAtomic(folder / "capture_started.txt", std::format("Version 13 capture requested: {}\n", a_reason));
 		g_captureIndex.store(a_index);
 		g_captureStartNs.store(Monitor::NowNs());
 		SetStep("thread stacks");
@@ -1564,8 +1701,15 @@ namespace Capture
 		const auto hist = SummarizeHistory(mods, 3);
 
 		std::string report;
-		report += std::format("The Watcher version 10 {} #{}  {}\n", a_manual ? "manual capture" : "stall capture", a_index, Util::Stamp(false));
+		report += std::format("The Watcher version 13 {} #{}  {}\n", a_manual ? "manual capture" : "stall capture", a_index, Util::Stamp(false));
 		report += std::format("Reason: {}\n", a_reason);
+		// (12) A capture that lands during a shader compile says so, so nobody hunts for a freeze that was a compile
+		if (mainOk) {
+			if (const auto shader = StackModuleMatch(mainStack, mods, cfg.shaderCompileModules); !shader.empty()) {
+				report += std::format("NOTE: the main thread is inside {} - it is compiling shaders (ENB, Effects 11, Community Shaders...).\n"
+				                      "      A pause while shaders compile is expected and usually not a freeze.\n", shader);
+			}
+		}
 		if (a_externalEvidence) report += "Independent evidence is in the independent_manual_ or independent_emergency_ folder; this report does not write a duplicate dump.\n";
 		report += std::format("Frame heartbeat age at stack capture: {:.0f} ms | Loading screen: {}\n", hbMs, loading ? "open" : "closed");
 		if (recovered) {
@@ -1580,6 +1724,13 @@ namespace Capture
 				static_cast<double>(now - s.loadStartNs.load()) / 1e9, s.loadEvents.load(), s.loadMaxGapUs.load() / 1000.0, s.loadFrames.load());
 		}
 		report += std::format("Context: {}\n\n", Monitor::ContextLine());
+		// (12) load breadcrumbs: the last objects, references and cells the game loaded (resolved when they loaded)
+		if (cfg.recentLoadEvents > 0) {
+			report += std::format("[RECENT LOAD EVENTS] last {}, oldest first (seconds before this report). During an endless load the last lines\n"
+			                      "and the most repeated forms point at the reference, cell or plugin the game is stuck on.\n{}",
+				cfg.recentLoadEvents, Monitor::RecentLoadsText(static_cast<std::size_t>(cfg.recentLoadEvents)));
+			report += std::format("[MOST REPEATED DURING THE {} LOADING SCREEN]\n{}\n", loading ? "CURRENT" : "LAST", Monitor::LoadRepeatsText(15, 5));
+		}
 		report += ResourceReport(now);
 
 		if (!hist.text.empty()) {
@@ -1618,13 +1769,14 @@ namespace Capture
 		}
 
 		const auto mainSig = mainOk ? Signature(mainStack, mods) : std::string();
+		const auto recentLoadsJson = Monitor::RecentLoadsJson(static_cast<std::size_t>(cfg.recentLoadEvents));
 		auto writeSummary = [&](const SamplingResult& a_sampling) {
 			const auto json = std::format(
-				"{{\n  \"watcher_version\":\"10\",\n  \"index\":{},\n  \"time\":{},\n  \"reason\":{},\n  \"recovered\":{},\n  \"heartbeat_age_ms\":{:.0f},\n"
-				"  \"loading\":{},\n  \"signature\":{},\n  \"main_stack_signature\":{},\n  \"context\":{},\n  \"history\":{},\n  \"main_stack\":{},\n"
+				"{{\n  \"watcher_version\":\"13\",\n  \"index\":{},\n  \"time\":{},\n  \"reason\":{},\n  \"recovered\":{},\n  \"heartbeat_age_ms\":{:.0f},\n"
+				"  \"loading\":{},\n  \"signature\":{},\n  \"main_stack_signature\":{},\n  \"context\":{},\n  \"recent_loads\":{},\n  \"history\":{},\n  \"main_stack\":{},\n"
 				"  \"sampling\":{{\"same\":{},\"changed\":{},\"incomplete\":{},\"main\":{}}},\n  \"thread_groups\":{}\n}}\n",
 				a_index, Util::Json(Util::Stamp(false)), Util::Json(a_reason), recovered ? "true" : "false", hbMs, loading ? "true" : "false",
-				Util::Json(!hist.signature.empty() ? hist.signature : mainSig), Util::Json(mainSig), ContextJson(), hist.json,
+				Util::Json(!hist.signature.empty() ? hist.signature : mainSig), Util::Json(mainSig), ContextJson(), recentLoadsJson, hist.json,
 				mainOk ? FramesJson(mainStack, mods) : std::string("[]"), a_sampling.same, a_sampling.changed, a_sampling.incomplete,
 				Util::Json(a_sampling.mainState), groupsJson);
 			Util::WriteFileAtomic(folder / "summary.json", json);
@@ -1683,12 +1835,11 @@ namespace Capture
 						spdlog::error("Dump helper unavailable: skipping dump; never fall back to writing inside a frozen game");
 					}
 				}
-				const char* how = "by helper process";
-				if (result == -1) {
-					result = 0;
-					how = "SKIPPED: external helper unavailable or external dumps disabled";
-				}
-				spdlog::critical("Minidump (level {}) {} {}: {}", cfg.minidumpLevel, result == 1 ? "written" : "FAILED", how, dumpPath.string());
+				const char* status = result == 1 ? "SUCCESS" : result == -1 ? "SKIPPED" : result == 2 ? "TIMED OUT" : "FAILED";
+				const char* how = result == -1 ? "external helper unavailable or external dumps disabled" :
+				                  result == 2  ? "helper still running; check its .log for the final result" :
+				                                 "by helper process";
+				spdlog::critical("Minidump (level {}) {} ({}): {}", cfg.minidumpLevel, status, how, dumpPath.string());
 			}
 		}
 
@@ -1700,7 +1851,7 @@ namespace Capture
 		if (a_manual) {
 			// Confirmation in game (shows once the game is running; if it is frozen, the beeps are the confirmation)
 			if (const auto tasks = SKSE::GetTaskInterface()) {
-				tasks->AddTask([]() { RE::DebugNotification("The Watcher: logs and report saved"); });
+				tasks->AddTask([]() { ShowNotification("The Watcher: logs and report saved"); });
 			}
 		}
 		return !light;

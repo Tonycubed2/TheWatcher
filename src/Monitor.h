@@ -89,4 +89,13 @@ namespace Monitor
 
 	// (1.1) One line describing where the player is and what is going on, for reports
 	std::string ContextLine();
+
+	// (12, load breadcrumbs) The newest a_max load events (object loaded/unloaded, reference attached/detached,
+	// cell fully loaded), oldest first, one indented line each with seconds before now, IDs, name and plugins.
+	// Safe from any thread and while the game is frozen: it only copies already-resolved text.
+	std::string RecentLoadsText(std::size_t a_max);
+	std::string RecentLoadsJson(std::size_t a_max);
+	// Forms with at least a_minCount load events during the current (or last) loading screen, most first.
+	// A loading screen that loops shows the same references here hundreds of times.
+	std::string LoadRepeatsText(std::size_t a_top, std::uint32_t a_minCount);
 }
