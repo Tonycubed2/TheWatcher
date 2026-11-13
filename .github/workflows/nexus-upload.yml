@@ -1,7 +1,7 @@
 name: Upload to Nexus Mods
 
 # Manual release: Actions tab -> "Upload to Nexus Mods" -> Run workflow.
-# Uploads Tony's own build: the zip attached to the GitHub release v<version> (TheWatcher-<version>.zip).
+# Uploads Tony's own build: release/TheWatcher-<version>.zip committed to main.
 # Nothing is built here. Checks the zip holds the DLL, the helper EXE and the INI, then uploads it as a new
 # version of the main file on Nexus.
 #
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version shown on Nexus (e.g. 16); the release v<version> must have TheWatcher-<version>.zip"
+        description: "Version shown on Nexus (e.g. 16); release/TheWatcher-<version>.zip must be on main"
         required: true
       changelog:
         description: "Changelog text (optional, plain text; use ' | ' to separate lines)"
@@ -45,12 +45,18 @@ jobs:
           if [ "$HAS_KEY" != "true" ]; then echo "::error::Secret NEXUSMODS_API_KEY is missing in the nexus environment"; exit 1; fi
           if [ -z "$FILE_ID" ]; then echo "::error::No File ID: pass file_id or set NEXUSMODS_FILE_ID in the nexus environment"; exit 1; fi
 
-      - name: Download the release zip (Tony's build)
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: main
+
+      - name: Take the release zip (Tony's build)
         env:
-          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
-          gh release download "v$VERSION" -R "$GITHUB_REPOSITORY" -p "TheWatcher-$VERSION.zip" -O TheWatcher.zip
+          if [ ! -f "main/release/TheWatcher-$VERSION.zip" ]; then echo "::error::main/release/TheWatcher-$VERSION.zip is missing"; exit 1; fi
+          cp "main/release/TheWatcher-$VERSION.zip" TheWatcher.zip
           unzip -l TheWatcher.zip
           for f in SKSE/Plugins/TheWatcher.dll SKSE/Plugins/TheWatcherDump.exe SKSE/Plugins/TheWatcher.ini; do
             if ! unzip -l TheWatcher.zip | grep -q " $f\$"; then echo "::error::MISSING $f in the zip - not uploading"; exit 1; fi
