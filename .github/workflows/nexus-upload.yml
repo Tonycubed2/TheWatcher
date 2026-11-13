@@ -7,8 +7,8 @@ name: Upload to Nexus Mods
 #
 # Needs, in the "nexus" environment (Settings -> Environments -> nexus):
 #   secret   NEXUSMODS_API_KEY  - personal API key from nexusmods.com/settings/api-keys
-#   variable NEXUSMODS_FILE_ID  - "File ID" of the main file (Files tab -> Advanced -> API), or pass file_id below
-#   variable NEXUSMODS_MOD_ID   - optional, "Unique Mod ID" (same dialog), for the changelog
+#   variable NEXUSMODS_FILE_ID  - optional, "File ID" of the main file (Files tab -> Advanced -> API); default 8047533
+#   variable NEXUSMODS_MOD_ID   - optional, "Unique Mod ID" (same dialog); default 7318624465771
 
 on:
   workflow_dispatch:
@@ -23,7 +23,7 @@ on:
       file_id:
         description: "Nexus File ID of the main file (Files tab -> Advanced -> API -> File ID)"
         required: false
-        default: ""
+        default: "8047533"
       display_name:
         description: "File name shown on Nexus"
         required: false
@@ -82,6 +82,6 @@ jobs:
           filename: TheWatcher.zip
           display_name: ${{ inputs.display_name }}
           version: ${{ inputs.version }}
-          mod_id: ${{ vars.NEXUSMODS_MOD_ID }}
+          mod_id: ${{ vars.NEXUSMODS_MOD_ID || '7318624465771' }}
           changelog: ${{ steps.log.outputs.text }}
           update_mod_version: true
