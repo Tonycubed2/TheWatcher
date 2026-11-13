@@ -1,0 +1,33 @@
+VERSION 14 HOOK TRACE - BUILD COMMANDS
+
+Changed files (already copied into C:\dllmaker\TheWatcher):
+- src\HookTrace.h (new)
+- src\DumpHelper.cpp
+- src\main.cpp (version text only)
+- CMakeLists.txt (version 14.0.0, TheWatcherDump links psapi)
+- cmake\headerlist.cmake (lists HookTrace.h)
+- CHANGELOG.md
+
+Open x64 Native Tools Command Prompt for VS 2022 and paste one line at a time:
+
+cd /d C:\dllmaker\TheWatcher
+
+cmake --preset build-release-msvc
+
+cmake --build --preset release-msvc --parallel 1
+
+Install together in your MO2 mod's SKSE\Plugins folder:
+- build\release-msvc\TheWatcher.dll
+- build\release-msvc\TheWatcher.pdb
+- build\release-msvc\TheWatcherDump.exe
+- TheWatcher.ini (unchanged; keep yours)
+
+TEST
+1. Start Skyrim, load a save, play a few seconds.
+2. Hold F12 (your capture key) for a manual capture while the game is running normally.
+3. Open SKSE\TheWatcher\independent_manual_*\hook_trace.txt.
+   Expected while the game runs: MAIN THREAD ACTIVITY shows the thread running, and the code path
+   is wherever the main thread happened to be.
+4. capture.log in that folder ends with "hook trace saved".
+5. Next freeze: the same file shows where the main thread sat, whether that code was patched,
+   and where the jump leads (the hook owner).

@@ -20,7 +20,8 @@ Defaults: 8-second gameplay detection, loading capture OFF, dumps OFF,
 reduced diagnostics during loading, 1024 MiB soft retention cap.
 The cap deletes old dumps first from the TheWatcher subfolder only.
 
-This package contains source. Portable regression checks passed. The maintainer built the Windows DLL/helper; their version 13 markers and matching DLL/PDB were inspected. In-game execution has not yet been validated.
+This package contains source. Portable regression checks passed, but Windows compilation
+and in-game execution have not been performed here.
 
 Optional Windows WCT integration test from the same developer prompt:
 cl /std:c++20 /EHsc tests\external_waitchains_test.cpp /link advapi32.lib
@@ -39,7 +40,7 @@ STARTUP TEST (SE 1.5.97 and AE 1.6.1170)
 8. Exit Skyrim and confirm the helper exits. Repeat startup and save loading to check normal behavior.
 
 LIMITATIONS
-- Source package only. Windows DLL/helper compilation was performed by the maintainer and the binaries were inspected. Skyrim execution has not yet been validated.
+- Source package only. Windows DLL/helper compilation and Skyrim execution were not performed in this Linux environment.
 - The early helper starts once this plugin's load function reaches settings initialization. It cannot diagnose a hang before this plugin loads.
 - External manual capture needs bIndependentWatchdog=1 and a valid enabled hotkey. If the helper fails, in-game polling still starts at DataLoaded.
 - Captures before DataLoaded provide external thread/module evidence; the in-game context report is unavailable until game monitoring starts.

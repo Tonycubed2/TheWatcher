@@ -1,0 +1,27 @@
+VERSION 15 CALL STACKS - BUILD COMMANDS
+
+Changed files (already in C:\dllmaker\TheWatcher):
+- src\CallStacks.h (new)
+- src\HookTrace.h (patch check limited to the thread's own function)
+- src\DumpHelper.cpp
+- src\main.cpp (version text only)
+- CMakeLists.txt (version 15.0.0, TheWatcherDump links version.lib)
+- cmake\headerlist.cmake
+- CHANGELOG.md
+
+Open x64 Native Tools Command Prompt for VS 2022 and paste one line at a time:
+
+cd /d C:\dllmaker\TheWatcher
+
+cmake --preset build-release-msvc
+
+cmake --build --preset release-msvc --parallel 1
+
+Then tell Claude it is built; it copies TheWatcher.dll, TheWatcher.pdb and TheWatcherDump.exe
+into F:\SkyrimSEMOModfolder\The Watcher\SKSE\Plugins.
+
+TEST
+1. Start the game, load a save, hold F12 once.
+2. The new independent_manual_* folder has call_stacks.txt.
+3. Top line under MAIN THREAD shows frames; SkyrimSE.exe lines end with "= ID <number>+0x...".
+4. The "Address Library:" line near the top names the versionlib file it loaded.

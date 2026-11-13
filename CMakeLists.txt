@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 # DLL name: TheWatcher.dll
-project(TheWatcher VERSION 13.0.0 LANGUAGES CXX)
+project(TheWatcher VERSION 16.0.0 LANGUAGES CXX)
 
 if("${PROJECT_SOURCE_DIR}" STREQUAL "${PROJECT_BINARY_DIR}")
 	message(FATAL_ERROR "in-source builds are not allowed")
@@ -62,4 +62,4 @@ target_link_libraries(${PROJECT_NAME} PRIVATE dbghelp psapi dxgi shell32 ole32 a
 # Helper program that writes the minidump from outside the frozen game. Ship it next to TheWatcher.dll.
 add_executable(TheWatcherDump src/DumpHelper.cpp)
 target_compile_features(TheWatcherDump PRIVATE cxx_std_20)
-target_link_libraries(TheWatcherDump PRIVATE dbghelp user32 advapi32)
+target_link_libraries(TheWatcherDump PRIVATE dbghelp user32 advapi32 psapi version)

@@ -57,7 +57,7 @@ namespace
 			spdlog::info("Startup: DataLoaded received; initializing game-dependent monitoring");
 			if (Settings::Get().eventsLog) {
 				Events::Open();
-				Events::Write(std::format("SESSION START  The Watcher version 13, game {}, pid {}", REL::Module::get().version().string(), GetCurrentProcessId()));
+				Events::Write(std::format("SESSION START  The Watcher version 16, game {}, pid {}", REL::Module::get().version().string(), GetCurrentProcessId()));
 			}
 			spdlog::info("Startup: registering event sinks");
 			Monitor::RegisterEventSinks();
@@ -81,7 +81,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 	const char* runtime = REL::Module::IsVR() ? "VR (1.4.x)" :
 	                      REL::Module::IsAE() ? (ver.minor() >= 7 ? "AE (1.7.x)" : "AE (1.6.x)") :
 	                      (REL::Module::IsSE() ? "SE (1.5.x)" : "unknown");
-	spdlog::info("The Watcher version 13 startup fix, game {} - runtime {} (built with CommonLibSSE-NG 6.7.0)", ver.string(), runtime);
+	spdlog::info("The Watcher version 16, game {} - runtime {} (built with CommonLibSSE-NG 6.7.0)", ver.string(), runtime);
 
 	// Plugins load on the game's main thread; the frame hook confirms this on its first call anyway
 	Monitor::Get().mainThreadId.store(GetCurrentThreadId());

@@ -1805,10 +1805,14 @@ namespace Capture
 			spdlog::critical("Backed up {} log files to {}", n, (folder / "logs").string());
 		}
 
-		if (!light && !a_externalEvidence) {
-			// 5) Tell the user
+		// 5) Tell the user (16: also for captures taken by the external helper; since version 12 every capture
+		//    comes from the helper, and the three beeps had stopped)
+		if (!light) {
 			SetStep("alert");
 			Alert();
+		}
+
+		if (!light && !a_externalEvidence) {
 
 			// 6) Thread sampling (takes about iThreadSamples x iSampleIntervalMs), appended to the saved report
 			if (cfg.threadSamples > 1) {

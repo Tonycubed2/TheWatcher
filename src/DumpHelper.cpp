@@ -1,4 +1,4 @@
-// Version 13: one-shot dump writer AND persistent independent watchdog.
+// Version 16: one-shot dump writer AND persistent independent watchdog.
 // --watch <pid> <mapping> <directory>; --capture <pid> <folder> <level> <mapping>
 // --waitchains <pid> <folder> <mapping>: isolated, non-suspending WCT child.
 // Legacy syntax remains: <pid> <output.dmp> <level 1-3>.
@@ -7,6 +7,8 @@
 #include "DumpValidation.h"
 #include "StoragePolicy.h"
 #include "ExternalWaitChains.h"
+#include "HookTrace.h"
+#include "CallStacks.h"
 #include <DbgHelp.h>
 #include <TlHelp32.h>
 #include <algorithm>
@@ -224,7 +226,7 @@ static int Watch(DWORD pid, const wchar_t* mappingName, const fs::path& root) {
     fs::create_directories(root, ec);
     PruneMonitorLogs(root);
     const auto log = root / (L"independent_" + Stamp() + L".log");
-    Log(log, "version 13 independent watchdog ready (protocol 13); manual capture available during startup; focus never suppresses capture; target pid " + std::to_string(pid));
+    Log(log, "version 16 independent watchdog ready (protocol 13); manual capture available during startup; focus never suppresses capture; target pid " + std::to_string(pid));
     wchar_t exe[32768]{}; GetModuleFileNameW(nullptr, exe, 32768);
     HANDLE worker = nullptr;
     bool workerManual = false;
@@ -400,6 +402,10 @@ static int Main(int argc, wchar_t** argv) {
         if (level) result = Dump(pid, folder / L"SkyrimSE.dmp", 1, log);
         // Save initial evidence before starting potentially blocking wait-chain queries.
         if (!level || result != 0) ThreadPointers(pid, log);
+        // (14) Follow the main thread's code: running or waiting, code patched in memory, where its jumps lead
+        HookTrace::Write(pid, static_cast<DWORD>(lease.p->mainThreadId), folder / L"hook_trace.txt", log, &Log);
+        // (15) Real call stacks for every thread, unwound with the modules' unwind tables, with Address Library IDs
+        CallStacks::Write(pid, static_cast<DWORD>(lease.p->mainThreadId), folder / L"call_stacks.txt", log, &Log);
         if (lease.p->waitChains) WaitChainsBounded(pid, folder, argv[5]);
         else Log(log, "wait chains SKIPPED: bWaitChains=0");
         if (level > 1 && result == 0) result = Dump(pid, folder / L"SkyrimSE_extended.dmp", level, log);

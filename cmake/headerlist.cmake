@@ -14,4 +14,6 @@ set(headers ${headers}
     src/IndependentDecision.h
     src/ExternalWaitChains.h
     src/Hotkey.h
+    src/HookTrace.h
+    src/CallStacks.h
 )

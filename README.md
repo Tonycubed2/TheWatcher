@@ -1,4 +1,4 @@
-## Version 13: startup capture update
+## Startup capture update (13)
 
 Build and install TheWatcher.dll and TheWatcherDump.exe together from this source; the IPC protocol is now 13. Existing INI settings remain supported. The helper starts during plugin initialization and accepts the configured manual key before DataLoaded. External automatic capture remains off until game monitoring initializes and a fresh heartbeat arrives. Event sinks and the in-game watchdog still start at DataLoaded. See BUILD_VERSION_13.txt for build steps, validation steps and limitations.
 
@@ -44,7 +44,7 @@ Snapshot-based PSS dumps are not implemented in this release. Enabling optional 
 process dumps can still pause Skyrim while Windows writes them. Dumps remain disabled
 by default; full memory still requires both level 3 and `bAllowFullMemoryDump=1`.
 
-## External wait chains and resource attribution (introduced in version 12)
+## External wait chains and resource attribution (Version 13)
 
 When `bWaitChains=1`, captures save `wait_chains.txt` from a separate process.
 The capture worker saves its initial snapshot/small dump before starting this
@@ -102,10 +102,7 @@ and truncated dump metadata/payloads, retention ordering, protected files, disab
 partial cleanup and symlink exclusion. INI and source/build protocol checks are included.
 
 A Windows integration test in `tests/external_waitchains_test.cpp` checks a
-real mutex wait. That Windows integration test and in-game timing have not been validated. The maintainer has compiled the Windows binaries (see below). This repository contains source, not compiled binaries. The changes remove identified sources of interference;
+real mutex wait. It has not been run here. Windows/MSVC compilation and in-game
+timing were not available here. This package is
+source, not compiled binaries. The changes remove identified sources of interference;
 they do not prove zero overhead or fix every underlying Skyrim freeze.
-
-
-## Validation of version 13
-
-The Windows DLL and helper were built by the maintainer. Inspection confirmed the DLL exports plugin version 13, both binaries include the version 13 startup changes, the helper identifies protocol 13, and the DLL matches its PDB. Portable capture-policy and hotkey regression checks passed. In-game startup/manual-capture validation is still pending; the source change improves capture coverage and does not establish the cause of an underlying Skyrim hang.

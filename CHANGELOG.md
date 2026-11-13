@@ -1,3 +1,38 @@
+## Version 16 - lock waits and deadlocks, beeps back
+
+- call_stacks.txt has a new LOCK WAITS section when threads are stuck on Skyrim's read/write locks (BSReadWriteLock):
+  - which thread waits for which lock, and whether it wants to read or write;
+  - who holds it: the writing thread from the lock itself, or for a read lock the threads that carry the lock in their saved registers;
+  - the object the lock belongs to, read from the game's own type information, with its form ID and base form (for example a Character and its base NPC);
+  - DEADLOCK lines when threads wait for each other in a circle.
+- Found from a real freeze on waking from sleep: two of Skyrim's job threads locked the same actor in opposite order (one casting a spell and sending a Papyrus event, one updating the actor), and the main thread waited for both forever. Version 16 names those threads and the actor directly.
+- The three beeps and flashing taskbar button on a capture are back. Since version 12 every capture comes from the external helper, and those captures skipped the alert.
+- Works on SE 1.5.97 and AE 1.6 / 1.7 (Address Library IDs for LockForRead / LockForWrite). Skyrim VR: call stacks without the LOCK WAITS section.
+- Helper protocol is unchanged (13). Install TheWatcher.dll and TheWatcherDump.exe together.
+
+## Version 15 - real call stacks
+
+- New file in every external capture folder: call_stacks.txt (manual F12 captures and automatic freeze captures).
+- Every thread's stack is walked the way a debugger does it, using each module's own unwind tables (.pdata/UNWIND_INFO) read from the running game. The result is the true chain of callers, not the raw "candidate" values in thread_snapshot.txt.
+- Works for SkyrimSE.exe even though its code is encrypted on disk: the unwind tables are read from the game's memory.
+- SkyrimSE.exe frames are labeled with Address Library IDs (formats 1, 2 and 5: SE, AE 1.6, AE 1.7), the same IDs CrashLogger and CommonLib use. The game version comes from SkyrimSE.exe; the Address Library file is looked up in Data\SKSE\Plugins.
+- The main thread is listed first (up to 128 frames); all other threads follow, with identical stacks grouped (for example 22 idle worker threads on one entry).
+- Each thread is suspended only long enough to copy its registers and stack, then resumed; the walking happens on the copy.
+- Fix (hook trace): the "PATCHED IN MEMORY" check compared 16 bytes even when the thread's function ended earlier, so a hook on the NEXT function in memory was reported as a patch on the thread's path. It now compares only bytes inside the thread's own function.
+- TheWatcherDump.exe now also links version.lib. Helper protocol is unchanged (13).
+
+## Version 14 - hook trace
+
+- New file in every external capture folder: hook_trace.txt (manual F12 captures and automatic freeze captures).
+- Main thread activity: CPU time used over half a second, so a capture says whether the frozen thread is running non-stop (an endless loop) or waiting (a lock, the GPU/driver, another thread). Five instruction-pointer samples, 100 ms apart.
+- Names where the main thread is: module and offset, the exported function name when there is one, and whether it is the first instruction of a function (read from the module file's own unwind table).
+- Compares the code there with the module file on disk. Code a mod rewrote at run time (a hook) is reported as PATCHED IN MEMORY; bytes the Windows loader relocates are skipped, so normal relocation is not reported.
+- Follows the jumps a hook writes (jmp rel32/rel8, jmp [rip+x], mov rax/r10/r11 + jmp, push + ret) hop by hop. Run-time memory that belongs to no DLL (a hook library's jump page) is described, and its pointers into modules are counted, which shows the DLL that owns the hook.
+- Reports a jump that leads back to an earlier hop as an endless loop, and a jump into unreadable memory as the crash case.
+- Reason: a freeze on 2026-11-03 stopped the main thread on the first instruction of Windows' DXGI Present (dxgi.dll+0x19000), and a crash the day before happened there on "jmp 0x7FF7ED4D0000". The old capture could not say which mod placed that jump.
+- Only reads memory. The main thread is suspended for microseconds per sample to read its registers and resumed before anything is written.
+- TheWatcherDump.exe now links psapi.lib. Helper protocol is unchanged (13).
+
 ## Version 13 - startup capture fix
 
 - Starts the independent helper and configures the manual capture key during plugin initialization, before Address Library loading and frame-hook installation.
